@@ -1,4 +1,4 @@
-//@name assistant_director
+//@name AD_get_over_here
 //@display-name AD야 잠깐 와봐
 //@api 3.0
 //@version 1.0.0
@@ -1635,5 +1635,5 @@
     } catch (e) { /* 종료 중 무시 */ }
   });
 
-  console.log('[AD] assistant_director v' + AD_VERSION + ' 로드 완료');
+  console.log('[AD] AD_get_over_here v' + AD_VERSION + ' 로드 완료');
 })();
