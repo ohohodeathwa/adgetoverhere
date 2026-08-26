@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.0.0
+//@display-name AD야 잠깐 와봐 v2.0.1
 //@api 3.0
-//@version 2.0.0
+//@version 2.0.1
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -36,7 +36,7 @@
   const LORE_CAP = 60000;
   const MEMORY_CAP = 20000;
   const FENCE = '```';
-  const AD_VERSION = '2.0.0';
+  const AD_VERSION = '2.0.1';
   const CARD_REALM_URL = 'https://realm.risuai.net/character/05a956cf-e350-44b3-a3d9-e437968f5f52';
 
   // 미니 팝오버 기하 — 루트 문서에서 자기 iframe의 style을 직접 잡아 크기를 바꾼다.
@@ -1537,10 +1537,11 @@
     const npc = !!state.settings.inputNpc;
     return [
       '<INPUT_OPTIONS>',
-      '- Length: about ' + sent + ' sentence(s). Aim close to that count — not a loose range.',
+      // 길이 = 하한. 초안이 이미 그보다 길면 초안을 줄이지 않는다 (기획자님 확정 08-26)
+      '- Length: at least ' + sent + ' sentence(s). This is a floor, not a target. If the draft already runs longer than that, keep everything it carries and let the result run longer — never cut the draft down to the number.',
       npc
-        ? "- Beyond the user: allowed — the input may also script other characters' (NPC) actions, thoughts, and dialogue when it serves the moment."
-        : '- Beyond the user: forbidden — write only the user-side. Never script NPC actions, thoughts, or dialogue.',
+        ? "- The other side: write the other character's reaction together with the user's input."
+        : "- The other side: write only from the user's side. Do not describe the other character's reaction.",
       "- Precedence: if the Director's draft says something that conflicts with these options, the Director's words win.",
       '</INPUT_OPTIONS>',
     ].join('\n');
@@ -1552,6 +1553,7 @@
     'Keep the intent exactly — do not redirect the scene, do not add events the draft did not ask for, do not resolve anything the draft left open.',
     'Fill in what the draft left thin: physical action, the senses in the room, and what sits under the words. Write in the same person and tense the chat already uses.',
     'Match the tone and register of the recent footage.',
+    "Before you output, read what you wrote back against the draft and check it line by line: does each line still carry what the Director asked for? If any part drifted — a beat the draft did not have, an event it did not ask for, a tone that is not its own — rewrite that part until it matches the draft's intent. Never report this check or mention that you did it.",
     'Output the finished input text ONLY — no heading, no explanation, no quotation marks around the whole thing, no code fence. Do not speak as AD here.',
     '</TASK>',
   ].join('\n');
@@ -2021,7 +2023,7 @@
     .adPill:hover { border-color: #a4707e; }
     .adPillLabel { flex: 1 1 auto; text-align: center; cursor: pointer; white-space: nowrap; }
     /* 드래그는 이 손잡이에서만 시작한다 — 본체를 잡고 끌면 클릭과 뒤엉킨다(기획자님 08-26) */
-    .adGrip { flex: 0 0 auto; width: 22px; align-self: stretch; display: inline-flex; align-items: center; justify-content: center; color: var(--adSub); font-size: 14px; cursor: grab; user-select: none; }
+    .adGrip { flex: 0 0 auto; width: 26px; align-self: stretch; display: inline-flex; align-items: center; justify-content: center; color: var(--adSub); font-size: 14px; cursor: grab; user-select: none; touch-action: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
     .adGrip:hover { color: #a4707e; }
     .adGrip:active { cursor: grabbing; }
 
@@ -3690,7 +3692,7 @@
     // 본체(.adDragTarget)의 인라인 스타일은 드래그 내내 손대지 않는다 = 크기가 변할 경로가 없다.
     const DRAG_SLOP = 5;
     const DRAG_CLICK_MS = 250;   // 드래그 종료 직후 합성되는 click은 곧바로 온다. 이 시한을 넘으면 사람이 새로 누른 것.
-    const DRAG_GEOM = GEOM_BASE + 'pointer-events:none;';
+    const DRAG_GEOM = GEOM_BASE + 'pointer-events:none;touch-action:none;';
     let dragRafPending = false;
 
     function pushDragGeom() {
@@ -3707,28 +3709,40 @@
       });
     }
 
-    // 화면(루트 문서) 좌표를 받는다
-    function onDragMove(sx, sy) {
+    // ★좌표는 화면 절대 좌표(screenX/screenY)의 이동분으로만 잡는다.
+    // iframe 내부 좌표(clientX)를 쓰면 iframe 자신이 드래그로 움직이는 대상이라
+    // 기준자가 같이 움직인다 = 재는 동안 자가 늘었다 줄었다 한다. 거기에 터치의
+    // 암묵적 포인터 캡처로 iframe 경로와 루트 경로가 동시에 살아 있어, 두 경로가
+    // 서로 다른 값을 번갈아 내면 팝오버가 두 자리 사이를 오가며 떤다(실기 08-26).
+    // 화면 절대 좌표는 iframe이 어디로 가든 변하지 않으므로 두 경로가 같은 값을 낸다.
+    function screenXY(ev) {
+      return {
+        x: typeof ev.screenX === 'number' ? ev.screenX : ev.clientX,
+        y: typeof ev.screenY === 'number' ? ev.screenY : ev.clientY,
+      };
+    }
+
+    function dragTo(ev) {
       const d = state.drag;
-      if (!d || !d.started) return;
-      d.curLeft = sx - d.offX;
-      d.curTop = sy - d.offY;
+      if (!d) return;
+      const s = screenXY(ev);
+      d.curLeft = d.baseLeft + (s.x - d.sx0);
+      d.curTop = d.baseTop + (s.y - d.sy0);
       pushDragGeom();
     }
 
-    async function beginDrag(d, sx, sy) {
-      d.starting = true;
+    // 시작 판정은 동기로 끝낸다 — 루트 리스너 등록(왕복 3회)을 기다리는 동안
+    // 이벤트를 버리면 손가락은 이미 갔는데 팝오버가 안 따라온다(실기 08-26 「곧장 안 먹는다」).
+    async function attachRoot(d) {
       try {
         const root = await api.getRootDocument();
+        if (state.drag !== d) return;   // 그 사이 드래그가 끝났다
         if (root) {
           d.root = root;
-          d.rootMoveId = await root.addEventListener('pointermove', (e) => onDragMove(e.clientX, e.clientY));
+          d.rootMoveId = await root.addEventListener('pointermove', (e) => dragTo(e));
           d.rootUpId = await root.addEventListener('pointerup', () => { finishDrag(); });
         }
-      } catch (e) { /* 루트 리스너를 못 걸면 아래 iframe 쪽 폴백으로 동작 */ }
-      d.started = true;
-      d.starting = false;
-      onDragMove(sx, sy);   // pointer-events:none이 걸린 기하를 즉시 적용
+      } catch (e) { /* 루트 리스너를 못 걸면 iframe 쪽 경로로 그대로 동작한다 */ }
     }
 
     async function finishDrag() {
@@ -3759,29 +3773,33 @@
       if (!t.closest('[data-drag]')) return;
       const rect = await frameRect();
       if (!rect) return;
+      const s0 = screenXY(ev);
       state.drag = {
         kind: state.surface,
-        offX: ev.clientX, offY: ev.clientY,     // 본체 안에서 잡은 자리
-        x0: ev.clientX, y0: ev.clientY,
+        sx0: s0.x, sy0: s0.y,                   // 손가락의 화면 절대 좌표 — 이동량의 기준점
+        baseLeft: rect.left, baseTop: rect.top, // 잡은 순간의 iframe 자리
+        x0: ev.clientX, y0: ev.clientY,         // 임계 판정에만 쓴다
         w: rect.width, h: rect.height,
-        curLeft: rect.left, curTop: rect.top,   // iframe의 화면 좌표 (우리가 관리)
-        started: false, starting: false, root: null, rootMoveId: null, rootUpId: null,
+        curLeft: rect.left, curTop: rect.top,
+        started: false, root: null, rootMoveId: null, rootUpId: null,
       };
     });
 
-    // 임계를 넘기 전까지는 포인터가 아직 iframe 위에 있으므로 여기서 받는다.
-    // 넘는 순간 루트로 넘기고, 이후 이 핸들러는 (pointer-events:none 때문에) 더 불리지 않는다.
-    document.addEventListener('pointermove', async (ev) => {
+    // 마우스는 임계를 넘으면 루트로 넘어가고(pointer-events:none) 이 핸들러가 더 불리지 않는다.
+    // ★터치는 pointerdown이 난 요소가 포인터를 자동으로 붙들어(암묵적 포인터 캡처)
+    // 드래그 내내 이 핸들러도 함께 불린다. 두 경로가 dragTo 하나를 쓰므로 같은 값이 나오고,
+    // 같은 이동이 두 번 들어와도 결과가 달라지지 않는다(= 떨리지 않는다).
+    document.addEventListener('pointermove', (ev) => {
       const d = state.drag;
-      if (!d || d.starting) return;
-      const sx = d.curLeft + ev.clientX;   // iframe이 아직 안 움직였으므로 그대로 화면 좌표가 된다
-      const sy = d.curTop + ev.clientY;
+      if (!d) return;
       if (!d.started) {
         if (Math.abs(ev.clientX - d.x0) + Math.abs(ev.clientY - d.y0) < DRAG_SLOP) return;
-        await beginDrag(d, sx, sy);
+        d.started = true;   // 동기로 시작 — 기다리지 않는다
+        dragTo(ev);         // 첫 이동을 그 자리에서 반영
+        attachRoot(d);      // 루트 리스너는 뒤따라 붙는다 (실패해도 이 경로로 동작)
         return;
       }
-      onDragMove(sx, sy);
+      dragTo(ev);
     });
 
     document.addEventListener('pointerup', () => { finishDrag(); });
