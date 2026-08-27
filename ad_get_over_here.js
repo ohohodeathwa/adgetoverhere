@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.0.1
+//@display-name AD야 잠깐 와봐 v2.0.2
 //@api 3.0
-//@version 2.0.1
+//@version 2.0.2
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -36,7 +36,7 @@
   const LORE_CAP = 60000;
   const MEMORY_CAP = 20000;
   const FENCE = '```';
-  const AD_VERSION = '2.0.1';
+  const AD_VERSION = '2.0.2';
   const CARD_REALM_URL = 'https://realm.risuai.net/character/05a956cf-e350-44b3-a3d9-e437968f5f52';
 
   // 미니 팝오버 기하 — 루트 문서에서 자기 iframe의 style을 직접 잡아 크기를 바꾼다.
@@ -1668,15 +1668,74 @@
       .replace(/(https?:\/\/[^\s<)\]]+)/g, '<button class="adLink" data-action="copy-link" data-url="$1" title="클릭하면 링크를 복사해요">$1</button>');
   }
 
-  // 코드블록 밖 텍스트용 경량 마크다운 (heading/list/hr/quote/문단)
+  // ---- 표 (GFM) ----
+  // 셀을 나눈다. `\|` 는 셀 안의 파이프 문자지 구분자가 아니다.
+  function splitRow(s) {
+    let t = s.trim();
+    if (t.startsWith('|')) t = t.slice(1);
+    if (t.endsWith('|') && !t.endsWith('\\|')) t = t.slice(0, -1);
+    const cells = [];
+    let cur = '';
+    for (let i = 0; i < t.length; i++) {
+      if (t[i] === '\\' && t[i + 1] === '|') { cur += '|'; i++; continue; }
+      if (t[i] === '|') { cells.push(cur.trim()); cur = ''; continue; }
+      cur += t[i];
+    }
+    cells.push(cur.trim());
+    return cells;
+  }
+
+  const isDivRow = (cells) => cells.length > 0 && cells.every((c) => /^:?-{1,}:?$/.test(c));
+
+  function alignOf(cell) {
+    const l = cell.startsWith(':'), r = cell.endsWith(':');
+    if (l && r) return 'center';
+    if (r) return 'right';
+    return '';
+  }
+
+  function tableHtml(head, div, rows) {
+    const al = div.map(alignOf);
+    const sty = (k) => (al[k] ? ' style="text-align:' + al[k] + '"' : '');
+    const th = head.map((c, k) => '<th' + sty(k) + '>' + inlineMd(c) + '</th>').join('');
+    const tb = rows.map((r) => {
+      let tds = '';
+      for (let k = 0; k < head.length; k++) tds += '<td' + sty(k) + '>' + inlineMd(r[k] === undefined ? '' : r[k]) + '</td>';
+      return '<tr>' + tds + '</tr>';
+    }).join('');
+    // 좁은 팝오버에서 넘칠 때를 대비해 가로 스크롤 상자에 담는다
+    return '<div class="adTableWrap"><table class="adTable"><thead><tr>' + th + '</tr></thead><tbody>' + tb + '</tbody></table></div>';
+  }
+
+  // 코드블록 밖 텍스트용 경량 마크다운 (heading/list/hr/quote/표/문단)
   function mdToHtml(text) {
     const lines = String(text || '').split('\n');
     const out = [];
     let listType = null;
     const closeList = () => { if (listType) { out.push('</' + listType + '>'); listType = null; } };
-    for (const line of lines) {
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
       const t = line.trim();
       if (!t) { closeList(); continue; }
+
+      // 표 — 이 줄 다음이 구분행(|---|---|)이면 표로 읽는다.
+      // 구분행 없이 파이프만 있는 줄은 표가 아니므로 건드리지 않는다.
+      if (t.indexOf('|') >= 0 && li + 1 < lines.length) {
+        const head = splitRow(t);
+        const div = splitRow(lines[li + 1].trim());
+        if (head.length >= 2 && div.length === head.length && isDivRow(div)) {
+          closeList();
+          const rows = [];
+          let j = li + 2;
+          while (j < lines.length && lines[j].trim() && lines[j].indexOf('|') >= 0) {
+            rows.push(splitRow(lines[j].trim()));
+            j++;
+          }
+          out.push(tableHtml(head, div, rows));
+          li = j - 1;
+          continue;
+        }
+      }
       const h = t.match(/^(#{1,4})\s+(.*)$/);
       if (h) {
         closeList();
@@ -1887,6 +1946,10 @@
     .adUl li, .adOl li { margin: 3px 0; }
     .adHr { border: none; border-top: 1px solid var(--adBorder); margin: 12px 0; }
     .adBq { border-left: 3px solid var(--adBorder); padding-left: 10px; color: var(--adSub); margin: 6px 0; }
+    .adTableWrap { margin: 8px 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .adTable { border-collapse: collapse; font-size: 12px; line-height: 1.5; min-width: 100%; }
+    .adTable th, .adTable td { border: 1px solid var(--adBorder); padding: 5px 8px; text-align: left; vertical-align: top; word-break: break-word; }
+    .adTable th { background: var(--adCard); font-weight: 600; white-space: nowrap; }
 
     .adArcTab { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 20px 20px; overflow-y: auto; }
     .adAdaptBar { display: flex; gap: 10px; align-items: flex-end; flex: 0 0 auto; }
