@@ -36,13 +36,15 @@
   const LORE_CAP = 60000;
   const MEMORY_CAP = 20000;
   const FENCE = '```';
-  const AD_VERSION = '2.0.2';
+  const AD_VERSION = '2.0.4';
   const CARD_REALM_URL = 'https://realm.risuai.net/character/05a956cf-e350-44b3-a3d9-e437968f5f52';
 
   // 미니 팝오버 기하 — 루트 문서에서 자기 iframe의 style을 직접 잡아 크기를 바꾼다.
   // (showContainer는 'fullscreen' 단일이지만 SafeElement.setStyle에는 속성 제한이 없다)
   const FRAME_ATTR = 'x-ad-frame'; // setAttribute는 x- 접두만 허용
   const PROBE_PX = 137;            // 자기 iframe 확정용 폭 프로브 값
+  const FRAME_RETRY_MS = 5000;     // 핸들 획득 실패 후 재시도까지의 쿨다운 (v2.0.4 — 구 1회 영구 래치 대체)
+  const PANEL_Z = 100010;          // 패널 전용 z — 호스트 직결 오버레이(z 5자리) 플러그인 위 (v2.0.4)
   const PILL_W = 156, PILL_H = 42;
   const MINI_W = 384, MINI_H = 470, MINI_H_BIG = 566; // 384 = 상단 메뉴 6개가 눌리지 않고 들어가는 폭(하네스 실측)
   const MINI_MIN_H = 170;          // 높이는 내용에 맞춘다 — MINI_H/MINI_H_BIG은 상한, 이것은 하한
@@ -228,7 +230,7 @@
     // --- 미니 팝오버 ---
     surface: 'none',    // 'none' | 'pill' | 'mini' | 'panel'
     frame: null,        // 자기 iframe의 SafeElement 핸들 (루트 문서)
-    frameTried: false,  // 핸들 획득 1회 시도 완료
+    frameTriedAt: 0,    // 핸들 획득 마지막 시도 시각 (v2.0.4 — 쿨다운 재시도)
     miniTab: 'advice',  // 'advice' | 'input'
     miniNarrow: false,  // 상단 메뉴 축약 모드 (좁은 화면)
     miniBig: false,     // 인풋 도우미 확장
@@ -784,12 +786,43 @@
   // (루트 문서에 직접 심는 UI는 이벤트에 target이 없어 버튼을 달 수 없다 — v3 실측)
   // ==========================================================================
 
-  // 자기 iframe 확정: 후보의 폭을 프로브 값으로 바꿔 보고 내 window.innerWidth가
-  // 따라 변하는지로 검증한다. 확정되면 x- 접두 마커를 남겨 이후엔 바로 조회한다.
+  // 자기 iframe 확정. ★v2.0.4 재설계 — 남의 플러그인 iframe을 건드리던 문제 수정:
+  //   ⑴마커(x-ad-frame) 선조회 = 무접촉 재획득 경로
+  //   ⑵읽기 전용 프리필터 = rect가 내 창 크기와 일치하는 후보만 프로브(불일치 = 내가 아님이 확정,
+  //     표시 중인 내가 0×0일 수 없으므로 0×0 후보는 접촉 없이 소거)
+  //   ⑶프로브 복원 = width 속성만 되돌림(구 스냅샷 통째 되쓰기는 40ms 사이 남의 자체 변경까지 롤백)
+  //   ⑷실패 = 5초 쿨다운 후 재시도(구 1회 영구 래치는 일시 상태로 세션 전체가 죽던 문제)
+  //   ⑸확정 iframe에 x-inlay-ignore 부여 — 인레이넥서스류 메시지 히트테스트 제외 규약(상호 오인 차단)
+  function widthOf(styleText) {
+    const m = /(?:^|;)\s*width\s*:\s*([^;]+)/i.exec(styleText || '');
+    return m ? m[1].trim() : '';
+  }
+
+  async function markFrame(cand, token) {
+    await cand.setAttribute(FRAME_ATTR, token);
+    try { await cand.setAttribute('x-inlay-ignore', 'true'); } catch (e) { /* 규약 미지원 = 무해 */ }
+  }
+
+  // 폭 프로브: 이 후보가 나면 내 window.innerWidth가 따라 변한다. width 속성만 만지고 되돌린다.
+  async function probeCand(cand) {
+    let savedW = '';
+    try { savedW = widthOf(await cand.getStyleAttribute()); } catch (e) { return false; }
+    try {
+      await cand.setStyle('width', PROBE_PX + 'px');
+      await sleep(40);
+      const hit = Math.abs(window.innerWidth - PROBE_PX) <= 2;
+      await cand.setStyle('width', savedW);
+      return hit;
+    } catch (e) {
+      try { await cand.setStyle('width', savedW); } catch (e2) { /* 원복 실패는 무시 */ }
+      return false;
+    }
+  }
+
   async function acquireFrame() {
     if (state.frame) return state.frame;
-    if (state.frameTried) return null;
-    state.frameTried = true;
+    if (state.frameTriedAt && (Date.now() - state.frameTriedAt) < FRAME_RETRY_MS) return null;
+    state.frameTriedAt = Date.now();
 
     let root;
     try {
@@ -799,27 +832,37 @@
 
     const token = makeId();
     try {
+      // ⑴ 마커 선조회 — 이전 획득분이 있으면 그 하나만 재검증(다른 iframe 무접촉)
+      try {
+        const marked = await root.querySelector('iframe[' + FRAME_ATTR + ']');
+        if (marked && await probeCand(marked)) {
+          await markFrame(marked, token);
+          state.frame = marked;
+          return marked;
+        }
+      } catch (e) { /* 선조회 실패 = 전체 탐색으로 */ }
+
       const list = await root.querySelectorAll('iframe');
       const n = await list.length();
-      // 우리 iframe은 showContainer 시 body 마지막으로 옮겨지므로 뒤에서부터 본다
+      const myW = window.innerWidth, myH = window.innerHeight;
+      const rest = [];
+      // ⑵ 프리필터 — 우리 iframe은 showContainer 시 body 마지막으로 옮겨지므로 뒤에서부터 본다
       for (let i = n - 1; i >= 0; i--) {
         const cand = await list.at(i);
         if (!cand) continue;
-        let saved = '';
-        try { saved = await cand.getStyleAttribute(); } catch (e) { continue; }
-        try {
-          await cand.setStyle('width', PROBE_PX + 'px');
-          await sleep(40);
-          const hit = Math.abs(window.innerWidth - PROBE_PX) <= 2;
-          await cand.setStyleAttribute(saved);
-          if (hit) {
-            await cand.setAttribute(FRAME_ATTR, token);
-            state.frame = cand;
-            return cand;
-          }
-        } catch (e) {
-          try { await cand.setStyleAttribute(saved); } catch (e2) { /* 원복 실패는 무시 */ }
+        let r = null;
+        try { r = await cand.getBoundingClientRect(); } catch (e) { r = null; }
+        if (r && Math.abs(r.width - myW) <= 2 && Math.abs(r.height - myH) <= 2) {
+          if (await probeCand(cand)) { await markFrame(cand, token); state.frame = cand; return cand; }
+        } else if (r && myW > 0 && r.width === 0 && r.height === 0) {
+          // 표시 중인 내가 0×0 후보일 수 없다 — 접촉 없이 소거 (display:none인 남의 iframe)
+        } else {
+          rest.push(cand);
         }
+      }
+      // ⑶ 폴백 — 프리필터가 못 가른 잔여 후보만 (내 창이 예외 상태일 때 대비, width만 접촉)
+      for (const cand of rest) {
+        if (await probeCand(cand)) { await markFrame(cand, token); state.frame = cand; return cand; }
       }
     } catch (e) { /* 루트 문서 접근 실패 = 기하 제어 없이 동작 */ }
     return null;
@@ -861,6 +904,20 @@
     return GEOM_BASE + 'left:' + left + 'px;bottom:' + bottom + 'px;width:' + w + 'px;height:' + h + 'px;';
   }
 
+  // ★v2.0.4: setStyleAttribute가 조용히 실패(핸들 무효화 등)해도 applyGeom이 true를 돌려주던 문제 —
+  // 실측 rect로 반영을 확인하고, 어긋나면 핸들을 폐기해 다음 acquireFrame이 재획득하게 한다.
+  // 실패의 소비처: 알약/미니 = showSurface 가드가 컨테이너를 숨김(투명 전체화면 잔존 = 타 플러그인
+  // 클릭 전멸의 주범이라, 표면 포기가 안전한 방향) / 패널 = 표시 유지(showContainer 전체화면으로 성립).
+  async function verifyGeom(frame, expectW, tol) {
+    try {
+      const r = await frame.getBoundingClientRect();
+      if (r && Math.abs(r.width - expectW) <= tol) return true;
+    } catch (e) { /* rect 실패 = 검증 실패 */ }
+    state.frame = null;
+    state.frameTriedAt = 0;
+    return false;
+  }
+
   // surface별 iframe 기하.
   // opts.expandOnly = 폭·위치·상한높이만 잡고 측정은 건너뛴다(그리기 전에 자리를 선점하는 용도).
   // 앵커는 state.miniAnchor를 따른다 — 평소엔 아래 고정(위로 자람), 탭 전환 때만 위 고정.
@@ -869,8 +926,13 @@
     const frame = await acquireFrame();
     if (!frame) return false;
     if (kind === 'panel') {
-      await frame.setStyleAttribute(GEOM_BASE + 'top:0;left:0;width:100%;height:100%;');
-      return true;
+      // ★v2.0.4: 패널만 z 승격(PANEL_Z) — 호스트 문서에 z 5자리 오버레이를 직접 심는 플러그인
+      // (인레이넥서스류)이 우리 패널(구 z-1000) 위를 덮어 "옵션 창이 안 열림"으로 보이던 문제.
+      // 알약/미니는 z-1000 유지 — 유휴 상태에서 남의 UI 위로 올라가지 않는다(비침범).
+      await frame.setStyleAttribute('position:fixed;border:none;background:transparent;display:block;'
+        + 'z-index:' + PANEL_Z + ';top:0;left:0;width:100%;height:100%;');
+      const vpp = await viewport();
+      return await verifyGeom(frame, vpp.w, Math.max(40, Math.round(vpp.w * 0.2)));
     }
     const sz = await miniSize();
     state.miniNarrow = sz.narrow;
@@ -888,7 +950,7 @@
     if (kind === 'pill' && !o.offscreen) {
       state.miniAnchor = 'bottom';
       await frame.setStyleAttribute(geomStr(g.left, g.bottom, PILL_W, PILL_H));
-      return true;
+      return await verifyGeom(frame, PILL_W, 40);
     }
 
     if (o.offscreen) {
@@ -896,7 +958,7 @@
       // 그 자리에서 그리면 줄어들기 전 모습이 그대로 보인다(실기 3회 제보 08-26).
       await frame.setStyleAttribute(GEOM_BASE + 'left:-10000px;top:0;width:' + w + 'px;height:'
         + (kind === 'pill' ? PILL_H : sz.maxH) + 'px;');
-      return true;
+      return await verifyGeom(frame, w, 40);
     }
 
     const topMode = state.miniAnchor === 'top';
@@ -907,7 +969,7 @@
     // 상한 높이로 펴 둔다. 본체가 앵커 쪽에 붙어 있으므로 이 상태에서 그려도
     // 화면에 보이는 것은 이미 최종 모습이다(반대쪽 남는 공간은 투명).
     await frame.setStyleAttribute(put(sz.maxH));
-    if (o.expandOnly) return true;
+    if (o.expandOnly) return await verifyGeom(frame, w, 40);
 
     // 자연 높이를 재서 iframe만 줄인다 — 뒤쪽 클릭이 통하게 하려는 것이지 모양을 바꾸는 게 아니다.
     await new Promise((r) => requestAnimationFrame(() => r()));
@@ -915,6 +977,7 @@
     const nat = wrap ? Math.ceil(wrap.getBoundingClientRect().height) : sz.maxH;
     const h = Math.max(MINI_MIN_H, Math.min(sz.maxH, nat));
     await frame.setStyleAttribute(put(h));
+    if (!(await verifyGeom(frame, w, 40))) return false;
 
     if (topMode) {
       // 높이가 확정됐으니 저장 앵커를 아래 기준으로 되돌린다.
@@ -969,7 +1032,14 @@
       return false;
     }
     render();
-    await applyGeom(kind);   // 측정하고 최종 자리로 (알약은 측정 없이 자리만)
+    // ★v2.0.4: 두 번째 기하 호출도 실패를 소비한다 — 여기서 실패한 채 두면 투명 전체화면(또는
+    // 상한 높이) iframe이 최상단에 잔존해 호스트 클릭(타 플러그인의 메시지 클릭 포함)을 전부 삼킨다.
+    const ok2 = await applyGeom(kind);   // 측정하고 최종 자리로 (알약은 측정 없이 자리만)
+    if (!ok2) {
+      state.surface = 'none';
+      await hideFrame();
+      return false;
+    }
     return true;
   }
 
@@ -2896,7 +2966,12 @@
     // 미니 표면에서 넘어올 때 이전 내용이 전체화면으로 늘어나 보이지 않게 비우고 편다
     document.body.innerHTML = '';
     await showFrame();
-    await applyGeom('panel');
+    // ★v2.0.4: 패널은 기하 제어에 실패해도 표시를 유지한다 — showContainer가 이미 전체화면으로
+    // 펴 놓아(z:1000) 패널 자체는 성립하고, 여기서 숨기면 기능이 사라진다. 기록만 남긴다.
+    // (z 승격 100010이 적용되지 않았을 뿐 — 닫을 때 restIdle 경로의 가드가 정리를 맡는다)
+    if (!(await applyGeom('panel'))) {
+      console.warn('[AD] 패널 기하 제어 실패 — showContainer 기본 전체화면(z:1000)으로 표시합니다.');
+    }
     render();
   }
 
@@ -3982,6 +4057,15 @@
       if (state.uiButton) await api.unregisterUIPart(state.uiButton.id);
       if (state.uiSetting) await api.unregisterUIPart(state.uiSetting.id);
     } catch (e) { /* 종료 중 무시 */ }
+    // ★v2.0.4: 드래그 도중 언로드되면 루트 문서에 pointermove/pointerup 리스너가 고아로 남던 문제
+    try {
+      const d = state.drag;
+      if (d && d.root) {
+        if (d.rootMoveId) await d.root.removeEventListener('pointermove', d.rootMoveId);
+        if (d.rootUpId) await d.root.removeEventListener('pointerup', d.rootUpId);
+      }
+    } catch (e) { /* 종료 중 무시 */ }
+    state.drag = null;
   });
 
   console.log('[AD] AD_get_over_here v' + AD_VERSION + ' 로드 완료');
