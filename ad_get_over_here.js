@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.0.2
+//@display-name AD야 잠깐 와봐 v2.0.3
 //@api 3.0
-//@version 2.0.2
+//@version 2.0.3
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -1063,11 +1063,17 @@
     const chat = await api.getChatFromIndex(env.charIdx, env.chatIdx);
 
     let userName = 'User';
+    let userPersonaPrompt = '';
     try {
       const db = await api.getDatabase(['personas', 'selectedPersona']);
       if (db && Array.isArray(db.personas) && typeof db.selectedPersona === 'number') {
         const p = db.personas[db.selectedPersona];
         if (p && p.name) userName = p.name;
+        // 페르소나 설정 본문 — 라이브 personaPrompt는 화이트리스트 밖이지만
+        // personas[] 항목의 personaPrompt로 같은 내용에 닿는다 (2.0.3)
+        if (p && p.personaPrompt && String(p.personaPrompt).trim()) {
+          userPersonaPrompt = String(p.personaPrompt);
+        }
       }
     } catch (e) { /* 동의 미부여 시 기본값 유지 */ }
 
@@ -1081,6 +1087,13 @@
     parts.push('[CARD] ' + cn);
     parts.push('[USER PERSONA] ' + userName + ' (the Director\'s in-story character)');
     parts.push('');
+
+    if (userPersonaPrompt) {
+      parts.push('[USER PERSONA PROFILE]');
+      parts.push(applyMacros(userPersonaPrompt, cn, userName));
+      brk.card += estTokens(userPersonaPrompt);
+      parts.push('');
+    }
 
     if (char.desc) {
       parts.push('[CARD DESCRIPTION]');
