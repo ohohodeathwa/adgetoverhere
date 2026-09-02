@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.0.3
+//@display-name AD야 잠깐 와봐 v2.0.5
 //@api 3.0
-//@version 2.0.3
+//@version 2.0.5
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -36,7 +36,7 @@
   const LORE_CAP = 60000;
   const MEMORY_CAP = 20000;
   const FENCE = '```';
-  const AD_VERSION = '2.0.4';
+  const AD_VERSION = '2.0.5';
   const CARD_REALM_URL = 'https://realm.risuai.net/character/05a956cf-e350-44b3-a3d9-e437968f5f52';
 
   // 미니 팝오버 기하 — 루트 문서에서 자기 iframe의 style을 직접 잡아 크기를 바꾼다.
@@ -1127,10 +1127,216 @@
       .replace(/\{\{user\}\}/gi, userName);
   }
 
+  // ==TOGGLE_CBS_BEGIN==
+  // 토글 조건 CBS 평가기 (v2.0.5) — 페르소나·desc·글노트·작가노트·로어북 본문에 들어 있는
+  // {{#when::toggle::X}} / {{#when::X::tis::V}} / {{#if {{getglobalvar::toggle_X}}}} 류 분기를,
+  // 이 채팅에 로컬 토글 값(chat.GLGlobalVariables — 리수 2026.8.240 「로컬 토글」)이 있을 때만 걸러낸다.
+  // 값을 알 수 없는 조건(전역 토글·지원 밖 함수)은 블록을 원문 그대로 둔다 → 로컬 토글을 안 쓰는
+  // 채팅에서는 종전과 출력이 같다. 판정 규칙은 리수 parser.svelte.ts의 blockStartMatcher /
+  // blockEndMatcher를 그대로 옮겼다(isTruthy = 'true'|'1' · when 연산자 스택 · else 줄 규칙 · 공백 줄 제거).
+  function makeCbsContext(char, chat) {
+    const gl = (chat && chat.GLGlobalVariables && typeof chat.GLGlobalVariables === 'object') ? chat.GLGlobalVariables : {};
+    const ss = (chat && chat.scriptstate && typeof chat.scriptstate === 'object') ? chat.scriptstate : {};
+    const defaults = {};
+    String((char && char.defaultVariables) || '').split('\n').forEach((line) => {
+      const kv = line.split('=');                       // 엔진 parseKeyValue와 동일(둘째 조각만 값 · 중복 키는 첫 줄)
+      if (kv[0] && kv[1] && !Object.prototype.hasOwnProperty.call(defaults, kv[0])) defaults[kv[0]] = kv[1];
+    });
+    return {
+      // 엔진 getGlobalChatVar: 로컬 값이 있고('' · 'null' 아님) 그것 → 아니면 전역. 전역은 플러그인이 못 읽으므로 undefined = 판정 불가
+      globalVar(name) {
+        const v = gl[name];
+        return (v !== undefined && v !== null && v !== '' && v !== 'null') ? String(v) : undefined;
+      },
+      // 엔진 getChatVar: scriptstate['$k'] → 카드 기본변수 → (템플릿 기본변수는 못 읽음) → 판정 불가
+      chatVar(name) {
+        const v = ss['$' + name];
+        if (v !== undefined && v !== null) return String(v);
+        if (Object.prototype.hasOwnProperty.call(defaults, name)) return defaults[name];
+        return undefined;
+      },
+      hasLocal: Object.keys(gl).length > 0,
+      localKeys: Object.keys(gl),
+      localMode: !!(chat && chat.useLocallySetGlobalVariables),   // 채팅의 「로컬 토글」 체크 상태
+      // 카드가 정의한 커스텀 토글 이름(변수=이름[=타입=옵션] 한 줄씩) — 값이 아직 채팅에 없는 토글을 짚어 안내하는 데 쓴다
+      definedToggles: String((char && char.customModuleToggle) || '').split('\n')
+        .map((l) => l.split('=')[0].trim()).filter(Boolean),
+    };
+  }
+
+  function evalToggleCbs(text, ctx) {
+    if (!text || !ctx) return text;
+    // 로컬 토글 값이 하나도 없는 채팅 = 완전 무동작(종전 출력 그대로). 채팅 변수 조건만 있는 카드도 건드리지 않는다.
+    if (!ctx.hasLocal) return text;
+    const src = String(text);
+    if (src.indexOf('{{') < 0) return src;
+    const truthy = (s) => s === 'true' || s === '1';
+
+    // {{...}} 한 토큰의 끝 위치(중첩 포함). 없으면 -1
+    function tokenEnd(s, start) {
+      let depth = 0, i = start;
+      while (i < s.length - 1) {
+        if (s[i] === '{' && s[i + 1] === '{') { depth++; i += 2; continue; }
+        if (s[i] === '}' && s[i + 1] === '}') { depth--; i += 2; if (depth === 0) return i; continue; }
+        i++;
+      }
+      return -1;
+    }
+
+    // 인라인 함수 치환 — getglobalvar / getvar만. 엔진 matcher()와 같이 이름만 정규화(소문자·공백/_/- 제거),
+    // 인자는 트림하지 않고 첫 인자만 쓴다. 남는 {{ = 판정 불가
+    function resolveInline(s) {
+      let unresolved = false;
+      const out = s.replace(/\{\{([^{}]*)\}\}/g, (m, p1) => {
+        const ci = p1.indexOf(':');
+        if (ci < 0) { unresolved = true; return m; }
+        const sp = p1[ci + 1] === ':' ? p1.split('::') : p1.split(':');
+        const name = sp[0].toLocaleLowerCase().replace(/[\s_-]/g, '');
+        if (name !== 'getglobalvar' && name !== 'getvar') { unresolved = true; return m; }
+        const v = name === 'getglobalvar' ? ctx.globalVar(sp[1]) : ctx.chatVar(sp[1]);
+        if (v === undefined) { unresolved = true; return m; }
+        return v;
+      });
+      if (out.indexOf('{{') >= 0) unresolved = true;
+      return { text: out, unresolved };
+    }
+
+    // 리수 blockStartMatcher 이식. 반환 null = 판정 불가(원문 유지)
+    function blockStart(p1) {
+      if (p1.startsWith('#if') || p1.startsWith('#if_pure ')) {
+        const state = p1.split(' ', 2)[1];
+        if (truthy(state)) return { type: p1.startsWith('#if_pure') ? 'ifpure' : 'parse' };
+        return { type: 'ignore' };
+      }
+      if (p1.startsWith('#when')) {
+        if (p1.startsWith('#when ')) {
+          return { type: truthy(p1.split(' ', 2)[1]) ? 'newif' : 'newif-falsy' };
+        }
+        if (!p1.startsWith('#when::')) return { type: 'newif-falsy' };
+        const statement = p1.split('::').slice(1);
+        if (statement.length === 1) return { type: truthy(statement[0]) ? 'newif' : 'newif-falsy' };
+        let mode = 'normal';
+        while (statement.length > 1) {
+          const condition = statement.pop();
+          const operator = statement.pop();
+          let v;
+          switch (operator) {
+            case 'not': statement.push(truthy(condition) ? '0' : '1'); break;
+            case 'keep': mode = 'keep'; statement.push(condition); break;
+            case 'legacy': mode = 'legacy'; statement.push(condition); break;
+            case 'and': { const c2 = statement.pop(); statement.push((truthy(condition) && truthy(c2)) ? '1' : '0'); break; }
+            case 'or': { const c2 = statement.pop(); statement.push((truthy(condition) || truthy(c2)) ? '1' : '0'); break; }
+            case 'is': { const c2 = statement.pop(); statement.push(condition === c2 ? '1' : '0'); break; }
+            case 'isnot': { const c2 = statement.pop(); statement.push(condition !== c2 ? '1' : '0'); break; }
+            case 'var': v = ctx.chatVar(condition); if (v === undefined) return null; statement.push(truthy(v) ? '1' : '0'); break;
+            case 'toggle': v = ctx.globalVar('toggle_' + condition); if (v === undefined) return null; statement.push(truthy(v) ? '1' : '0'); break;
+            case 'vis': v = ctx.chatVar(statement.pop()); if (v === undefined) return null; statement.push(v === condition ? '1' : '0'); break;
+            case 'visnot': v = ctx.chatVar(statement.pop()); if (v === undefined) return null; statement.push(v !== condition ? '1' : '0'); break;
+            case 'tis': v = ctx.globalVar('toggle_' + statement.pop()); if (v === undefined) return null; statement.push(v === condition ? '1' : '0'); break;
+            case 'tisnot': v = ctx.globalVar('toggle_' + statement.pop()); if (v === undefined) return null; statement.push(v !== condition ? '1' : '0'); break;
+            case '>': { const c2 = statement.pop(); statement.push(parseFloat(c2) > parseFloat(condition) ? '1' : '0'); break; }
+            case '<': { const c2 = statement.pop(); statement.push(parseFloat(c2) < parseFloat(condition) ? '1' : '0'); break; }
+            case '>=': { const c2 = statement.pop(); statement.push(parseFloat(c2) >= parseFloat(condition) ? '1' : '0'); break; }
+            case '<=': { const c2 = statement.pop(); statement.push(parseFloat(c2) <= parseFloat(condition) ? '1' : '0'); break; }
+            default: statement.push(truthy(condition) ? '1' : '0'); break;
+          }
+        }
+        const ok = truthy(statement[0]);
+        if (mode === 'legacy') return { type: ok ? 'parse' : 'ignore' };
+        if (mode === 'keep') return { type: ok ? 'newif' : 'newif-falsy', type2: 'keep' };
+        return { type: ok ? 'newif' : 'newif-falsy' };
+      }
+      return null;
+    }
+
+    // 리수 blockEndMatcher 이식(이 평가기가 다루는 타입만)
+    function blockEnd(body, m) {
+      const trimLines = (p) => p.split('\n').map((v) => v.trimStart()).join('\n').trim();
+      switch (m.type) {
+        case 'ignore': return '';
+        case 'parse': return trimLines(body.trim());
+        case 'ifpure': return body;
+        case 'newif':
+        case 'newif-falsy': {
+          const lines = body.split('\n');
+          if (lines.length === 1) {
+            const ei = body.indexOf('{{:else}}');
+            if (ei !== -1) return m.type === 'newif' ? body.substring(0, ei) : body.substring(ei + 9);
+            return m.type === 'newif' ? body : '';
+          }
+          const elseLine = lines.findIndex((v) => v.trim() === '{{:else}}');
+          if (elseLine !== -1 && m.type === 'newif') lines.splice(elseLine);
+          if (elseLine !== -1 && m.type === 'newif-falsy') lines.splice(0, elseLine + 1);
+          if (elseLine === -1 && m.type === 'newif-falsy') return '';
+          if (m.type2 !== 'keep') {
+            while (lines.length > 0 && lines[0].trim() === '') lines.shift();
+            while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
+          }
+          return lines.join('\n');
+        }
+      }
+      return body;
+    }
+
+    // 엔진이 블록으로 여는 태그 전부(blockStartMatcher의 'nothing' 아닌 것) — 이 안의 {{/...}}는 그 블록의 닫힘이다.
+    const isWhenIf = (t) => t.startsWith('#when') || t.startsWith('#if');
+    const isBlock = (t) => isWhenIf(t) || t === '#pure' || t === '#pure_display' || t === '#puredisplay' || t === '#code'
+      || t.startsWith('#escape') || t.startsWith('#each') || (t.startsWith('#func') && t.split(' ').length > 1);
+
+    // 규칙: 엔진은 안쪽 블록을 먼저 치환한 뒤 바깥의 {{:else}}·공백 줄을 가른다. 안쪽에 판정 불가가 하나라도 있으면
+    // 줄 구조가 엔진과 달라질 수 있으므로 바깥 블록째 원문으로 둔다(보수적). 토큰 내부는 엔진과 같이 트림하지 않는다.
+    function walk(s) {
+      let out = '';
+      let i = 0;
+      let unresolved = false;
+      while (i < s.length) {
+        const open = s.indexOf('{{', i);
+        if (open < 0) { out += s.slice(i); break; }
+        out += s.slice(i, open);
+        const end = tokenEnd(s, open);
+        if (end < 0) { out += s.slice(open); unresolved = true; break; }
+        const inner = s.slice(open + 2, end - 2);
+        if (isBlock(inner)) {
+          // 짝 닫힘({{/...}}) 찾기 — 엔진이 블록으로 여는 모든 태그를 중첩으로 계산
+          let depth = 1, p = end, close = -1, closeEnd = -1;
+          while (p < s.length) {
+            const o = s.indexOf('{{', p);
+            if (o < 0) break;
+            const e = tokenEnd(s, o);
+            if (e < 0) break;
+            const t = s.slice(o + 2, e - 2);
+            if (isBlock(t)) depth++;
+            else if (t.startsWith('/') && !t.startsWith('//')) { depth--; if (depth === 0) { close = o; closeEnd = e; break; } }
+            p = e;
+          }
+          if (close < 0) { out += s.slice(open); unresolved = true; break; }   // 닫힘 없음 = 원문
+          if (!isWhenIf(inner)) { out += s.slice(open, closeEnd); unresolved = true; i = closeEnd; continue; } // 다른 블록 = 원문
+          const cond = resolveInline(inner);
+          const m = cond.unresolved ? null : blockStart(cond.text);
+          if (!m) { out += s.slice(open, closeEnd); unresolved = true; i = closeEnd; continue; }  // 판정 불가 = 블록 원문
+          const inn = walk(s.slice(end, close));
+          if (inn.unresolved) { out += s.slice(open, closeEnd); unresolved = true; i = closeEnd; continue; }  // 안쪽 판정 불가 → 바깥째 원문
+          out += blockEnd(inn.text, m);
+          i = closeEnd;
+          continue;
+        }
+        const single = resolveInline(s.slice(open, end));
+        out += single.unresolved ? s.slice(open, end) : single.text;   // 인라인 미해결 토큰은 그 자리에 원문(줄 구조 유지)
+        i = end;
+      }
+      return { text: out, unresolved };
+    }
+    return walk(src).text;
+  }
+  // ==TOGGLE_CBS_END==
+
   async function buildContextBlock() {
     const env = state.env;
     const char = await api.getCharacter();
     const chat = await api.getChatFromIndex(env.charIdx, env.chatIdx);
+    // 이 채팅의 로컬 토글·채팅 변수로 카드 텍스트의 토글 분기를 걸러낸다(v2.0.5 — 판정 불가 시 원문)
+    const cbsCtx = makeCbsContext(char, chat);
+    const cbs = (t) => evalToggleCbs(t, cbsCtx);
 
     let userName = 'User';
     let userPersonaPrompt = '';
@@ -1156,33 +1362,63 @@
     parts.push('');
     parts.push('[CARD] ' + cn);
     parts.push('[USER PERSONA] ' + userName + ' (the Director\'s in-story character)');
+    // 셀프 보고(v2.0.5): 버전과 이 채팅의 로컬 토글 키 — 감독님이 "토글 상태/버전"을 물으면 이 줄로 답한다.
+    parts.push('[PLUGIN] AD v' + AD_VERSION
+      + ' · this chat\'s "Local Toggles" checkbox: ' + (cbsCtx.localMode ? 'ON' : 'OFF')
+      + ' · local toggle values in this chat: ' + (cbsCtx.localKeys.length ? cbsCtx.localKeys.join(', ') : 'none')
+      + (cbsCtx.hasLocal
+        ? ' — toggle conditions in the card texts below are already resolved to the active branch.'
+        : ' — toggle conditions are left as raw text (the plugin cannot read global toggle values; a value is stored in the chat only when the toggle is changed while the checkbox is ON).'));
+    // 리수는 「로컬 토글」을 켜도 기존 값을 채팅으로 복사하지 않는다 — 켠 뒤에 조작한 토글만 채팅에 기록된다.
+    // 정의는 있는데 값이 없는 토글을 이름으로 짚어, AD가 감독님께 조작 순서를 안내하게 한다 (v2.0.5 · 기획자님 09-02 우려).
+    const missing = cbsCtx.definedToggles.filter((k) => cbsCtx.localKeys.indexOf('toggle_' + k) < 0);
+    if (missing.length) {
+      parts.push('[TOGGLE SETUP HINT] This card defines toggles without a value stored in this chat: ' + missing.join(', ')
+        + '. RisuAI stores a toggle in the chat only when it is switched while "Local Toggles" is ON; turning the checkbox on does not copy existing values. '
+        + (cbsCtx.localMode
+          ? 'If the Director asks about toggles or gets unfiltered toggle text, tell them in one line: switch each of these toggles off and on once (Local Toggles is already ON).'
+          : 'If the Director asks about toggles or gets unfiltered toggle text, tell them in one line: enable "Local Toggles" at the bottom of the toggle list first, then switch each of these toggles off and on once.'));
+    }
+    if (!cbsCtx.hasLocal) {
+      // 폴백(기획자님 09-02): 값을 모를 때는 분기를 합쳐 읽지 말고 경우를 나눠 서술
+      parts.push('[TOGGLE READING RULE] Any {{#when::toggle::X}} … {{:else}} … {{/when}} or {{#if {{getglobalvar::toggle_X}}}} … {{/if}} block below is a conditional: only ONE branch is active in the real chat, depending on toggle X, and you cannot see which. Treat the branches as separate cases keyed by that toggle. Never blend both branches into one description of the character or persona; when it matters for advice, say which case you assume or answer per case.');
+    }
     parts.push('');
 
     if (userPersonaPrompt) {
+      const t = cbs(userPersonaPrompt);
       parts.push('[USER PERSONA PROFILE]');
-      parts.push(applyMacros(userPersonaPrompt, cn, userName));
-      brk.card += estTokens(userPersonaPrompt);
+      parts.push(applyMacros(t, cn, userName));
+      brk.card += estTokens(t);
+      parts.push('');
+    } else {
+      // 리수는 설정란의 라이브 본문을 personas[] 저장본에 「페르소나 아이콘 클릭(전환)」 때만 복사한다(persona.ts saveUserPersona).
+      // 플러그인은 저장본만 읽을 수 있으므로, 비어 있으면 감독님이 동기화 조작을 하도록 AD가 안내하게 한다 (v2.0.5).
+      parts.push('[USER PERSONA PROFILE] (empty in the saved copy — the plugin can only read the saved persona list. If the Director just wrote or edited the persona in Settings, the text is not saved to the list until they click the persona icon once (switching to it). Tell the Director this in one line and do not ask them to paste the text.)');
       parts.push('');
     }
 
     if (char.desc) {
+      const t = cbs(char.desc);
       parts.push('[CARD DESCRIPTION]');
-      parts.push(applyMacros(char.desc, cn, userName));
-      brk.card += estTokens(char.desc);
+      parts.push(applyMacros(t, cn, userName));
+      brk.card += estTokens(t);
       parts.push('');
     }
 
     if (char.replaceGlobalNote && char.replaceGlobalNote.trim()) {
+      const t = cbs(char.replaceGlobalNote);
       parts.push('[GLOBAL NOTE (card override)]');
-      parts.push(applyMacros(char.replaceGlobalNote, cn, userName));
-      brk.card += estTokens(char.replaceGlobalNote);
+      parts.push(applyMacros(t, cn, userName));
+      brk.card += estTokens(t);
       parts.push('');
     }
 
     if (chat && chat.note && chat.note.trim()) {
+      const t = cbs(chat.note);
       parts.push("[AUTHOR'S NOTE (this chat)]");
-      parts.push(applyMacros(chat.note, cn, userName));
-      brk.etc += estTokens(chat.note);
+      parts.push(applyMacros(t, cn, userName));
+      brk.etc += estTokens(t);
       parts.push('');
     }
 
@@ -1211,7 +1447,7 @@
             const e = row.e;
             if (!e.content) continue;
             const label = (e.comment && e.comment.trim()) ? e.comment.trim() : String(e.key || '').slice(0, 60);
-            const body = applyMacros(e.content, cn, userName);
+            const body = applyMacros(cbs(e.content), cn, userName);
             const piece = '- <entry name="' + label + '" scope="' + row.scope + '" keys="' + String(e.key || '')
               + '" always_active="' + (e.alwaysActive ? 'true' : 'false') + '">\n' + body + '\n</entry>';
             if (used + piece.length > LORE_CAP) { skipped++; continue; }
