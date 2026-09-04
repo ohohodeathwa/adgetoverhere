@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.0.5
+//@display-name AD야 잠깐 와봐 v2.0.6
 //@api 3.0
-//@version 2.0.5
+//@version 2.0.6
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -36,7 +36,7 @@
   const LORE_CAP = 60000;
   const MEMORY_CAP = 20000;
   const FENCE = '```';
-  const AD_VERSION = '2.0.5';
+  const AD_VERSION = '2.0.6';
   const CARD_REALM_URL = 'https://realm.risuai.net/character/05a956cf-e350-44b3-a3d9-e437968f5f52';
 
   // 미니 팝오버 기하 — 루트 문서에서 자기 iframe의 style을 직접 잡아 크기를 바꾼다.
@@ -1004,6 +1004,16 @@
   // 그 호출이 iframe을 매번 전체화면으로 되돌려 놓아, 줄어들기 전까지 깜빡임이 보였다(실기 08-26).
   async function showFrame() {
     if (state.shown) return;
+    // ★v2.0.6: mainDom 권한은 iframe을 펴기 전에 먼저 묻는다 — 리스 확인창(z-50)이 전체화면
+    // iframe(z-1000) 뒤에 깔려 승인 자체가 불가능하던 경로(웹 리스 제보 09-05). db 선요청과 같은 자리.
+    // 거부해도 진행한다 — acquireFrame이 null을 돌려주고 기존 실패 경로(알약 포기 / 패널 z-1000 유지)가 맡는다.
+    if (!state.rootPermAsked) {
+      state.rootPermAsked = true;
+      try { await api.requestPluginPermission('mainDom'); } catch (e) { /* 미지원/거부 = 기하 제어 없이 동작 */ }
+      // 첫 권한(mainDom)이 승인되면 리수는 같은 세션의 나머지 권한을 추가 확인 없이 통과시킨다 —
+      // 치환기 등록을 이 뒤에 두어 첫 권한창을 "대화 조작 치환" 문구가 아니라 "메인 DOM 접근" 1회로 만든다.
+      try { if (state.ensureHooks) await state.ensureHooks(); } catch (e) { /* 등록 실패는 각 ensure 안에서 기록 */ }
+    }
     await api.showContainer('fullscreen');
     state.shown = true;
   }
@@ -3207,8 +3217,16 @@
     // (z 승격 100010이 적용되지 않았을 뿐 — 닫을 때 restIdle 경로의 가드가 정리를 맡는다)
     if (!(await applyGeom('panel'))) {
       console.warn('[AD] 패널 기하 제어 실패 — showContainer 기본 전체화면(z:1000)으로 표시합니다.');
+      state.geomFailed = true;
+    } else {
+      state.geomFailed = false;
     }
     render();
+    // ★v2.0.6: 권한이 거부된 세션은 패널이 z-1000에 머물러 다른 플러그인 창에 가려질 수 있다.
+    // 보이는 동안이라도 복구 경로를 알린다(거부는 세션 한정 — 새로고침 후 확인창에서 허용하면 풀린다).
+    if (state.geomFailed) {
+      try { toast('플러그인 권한이 거부된 세션입니다. 페이지를 새로고침한 뒤 확인창에서 허용해 주세요.'); } catch (e) { /* 표시 실패 무시 */ }
+    }
   }
 
   async function newThread() {
@@ -4257,10 +4275,19 @@
     try { markGenStart(); } catch (e) { /* 어떤 경우에도 요청을 막지 않는다 */ }
     return formated;
   };
-  try {
-    await api.addRisuReplacer('beforeRequest', onBeforeRequest);
-  } catch (e) {
-    console.warn('[AD] 생성 감지 훅 등록 실패 — 로어북 저장은 재읽기·되돌리기로만 보호됩니다.', e);
+  // ★v2.0.6: 치환기 등록을 시작 시점에서 첫 컨테이너 노출 시점으로 미룬다(showFrame → ensureReplacer).
+  // 이유(웹 리스 실측 09-05): 시작 직후 뜨는 첫 권한창이 "대화 내용을 조작할 수 있는 치환 권한"이라
+  // 반사적으로 NO를 받기 쉽고, 시작 시 다른 알림과 겹치면 조용히 거부로 처리된다(alertConfirm 덮어쓰기).
+  // 한 번 거부되면 세션 내 모든 권한이 거부돼 알약이 숨고 패널이 z-1000에 머문다(타 플러그인 iframe에 가려짐).
+  // 생성 감지 훅은 패널을 열기 전엔 쓸 일이 없다(로어북 저장 보호용).
+  async function ensureReplacer() {
+    if (state.replacerRegistered) return;
+    state.replacerRegistered = true;
+    try {
+      await api.addRisuReplacer('beforeRequest', onBeforeRequest);
+    } catch (e) {
+      console.warn('[AD] 생성 감지 훅 등록 실패 — 로어북 저장은 재읽기·되돌리기로만 보호됩니다.', e);
+    }
   }
 
   const onOutput = async () => {
@@ -4275,11 +4302,21 @@
     if (state.surface === 'pill') await showMini('advice');
     await runAdvice(false);
   };
-  try {
-    await api.addRisuChatListener('output', onOutput);
-  } catch (e) {
-    console.warn('[AD] 출력 리스너 등록 실패 — AD 의견 자동 호출은 꺼진 상태로 동작합니다.', e);
+  // ★v2.0.6: 출력 리스너도 시작 시점이 아니라 첫 컨테이너 노출 시점에 등록한다(showFrame → ensureHooks).
+  // 리수 v2026.8.240+는 addRisuChatListener·addRisuReplacer에 "치환 권한"을 3일 주기로 재확인한다
+  // (v3.svelte.ts:724·732 'periodically'). 시작 직후 그 확인창이 뜨고, NO나 알림 겹침 한 번이면
+  // 세션 전체 권한이 거부돼 알약이 숨고 패널이 z-1000에 머문다(웹 리스 실측 09-05).
+  // mainDom을 먼저 승인받은 뒤에 등록하면 같은 세션의 나머지 권한은 확인창 없이 통과한다.
+  async function ensureChatListener() {
+    if (state.chatListenerRegistered) return;
+    state.chatListenerRegistered = true;
+    try {
+      await api.addRisuChatListener('output', onOutput);
+    } catch (e) {
+      console.warn('[AD] 출력 리스너 등록 실패 — AD 의견 자동 호출은 꺼진 상태로 동작합니다.', e);
+    }
   }
+  state.ensureHooks = async () => { await ensureReplacer(); await ensureChatListener(); };
 
   // AD 부르기 팝오버 = 기본 켬. 알약을 띄우고 iframe을 그 크기로 줄인다.
   if (state.settings.miniEnabled) {
