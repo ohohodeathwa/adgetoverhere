@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.0.6
+//@display-name AD야 잠깐 와봐 v2.0.7
 //@api 3.0
-//@version 2.0.6
+//@version 2.0.7
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -36,13 +36,20 @@
   const LORE_CAP = 60000;
   const MEMORY_CAP = 20000;
   const FENCE = '```';
-  const AD_VERSION = '2.0.6';
+  const AD_VERSION = '2.0.7';
   const CARD_REALM_URL = 'https://realm.risuai.net/character/05a956cf-e350-44b3-a3d9-e437968f5f52';
 
   // 미니 팝오버 기하 — 루트 문서에서 자기 iframe의 style을 직접 잡아 크기를 바꾼다.
   // (showContainer는 'fullscreen' 단일이지만 SafeElement.setStyle에는 속성 제한이 없다)
   const FRAME_ATTR = 'x-ad-frame'; // setAttribute는 x- 접두만 허용
   const PROBE_PX = 137;            // 자기 iframe 확정용 폭 프로브 값
+  // ★v2.0.7: 시작 시 알약(= 첫 권한창)은 유저가 채팅을 연 뒤에 띄운다. 리수 시작 로딩(콜드스토리지 생성 등)의
+  // 알림이 권한 확인창을 덮으면 리수가 거부로 귀결시키고 그 세션 내내 플러그인 전체 권한이 잠긴다
+  // (alert.ts alertConfirm = 알림 한 칸 덮어쓰기 · v3.svelte.ts getPluginPermission = 플러그인 이름 단위 세션 거부).
+  // 홈 화면 = getCurrentCharacterIndex() -1(권한 불요) → 0 이상이 되면 유저가 캐릭터를 클릭한 뒤다.
+  const START_POLL_MS = 1000;      // 채팅 진입 폴링 간격
+  const START_POLL_ERR_MAX = 3;    // 인덱스 API가 연속으로 실패하면 게이트를 포기하고 예전처럼 바로 띄운다
+  const PERM_DENIED_MSG = 'AD야 잠깐 와봐: 메인 문서(main Document) 권한이 거부된 세션입니다. 확인창이 다른 알림에 가려졌을 수 있습니다. 페이지를 새로고침한 뒤 확인창에서 YES를 눌러 주세요.';
   const FRAME_RETRY_MS = 5000;     // 핸들 획득 실패 후 재시도까지의 쿨다운 (v2.0.4 — 구 1회 영구 래치 대체)
   const PANEL_Z = 100010;          // 패널 전용 z — 호스트 직결 오버레이(z 5자리) 플러그인 위 (v2.0.4)
   const PILL_W = 156, PILL_H = 42;
@@ -684,10 +691,10 @@
 
   function loreDraftFromDom() {
     const doc = document;
-    const name = doc.getElementById('adLoreName');
-    const key = doc.getElementById('adLoreKey');
-    const body = doc.getElementById('adLoreContent');
-    const always = doc.getElementById('adLoreAlways');
+    const name = doc.getElementById('ghLoreName');
+    const key = doc.getElementById('ghLoreKey');
+    const body = doc.getElementById('ghLoreContent');
+    const always = doc.getElementById('ghLoreAlways');
     return {
       comment: name ? name.value : '',
       key: key ? key.value : '',
@@ -973,7 +980,7 @@
 
     // 자연 높이를 재서 iframe만 줄인다 — 뒤쪽 클릭이 통하게 하려는 것이지 모양을 바꾸는 게 아니다.
     await new Promise((r) => requestAnimationFrame(() => r()));
-    const wrap = document.getElementById('adMiniWrap');
+    const wrap = document.getElementById('ghMiniWrap');
     const nat = wrap ? Math.ceil(wrap.getBoundingClientRect().height) : sz.maxH;
     const h = Math.max(MINI_MIN_H, Math.min(sz.maxH, nat));
     await frame.setStyleAttribute(put(h));
@@ -1004,12 +1011,24 @@
   // 그 호출이 iframe을 매번 전체화면으로 되돌려 놓아, 줄어들기 전까지 깜빡임이 보였다(실기 08-26).
   async function showFrame() {
     if (state.shown) return;
+    // ★v2.0.7 감사 반영: 어떤 표면이든 열리는 순간 시작 게이트는 소용이 없다 — 게이트 tick이 뒤늦게 showPill을
+    // 실행해 유저가 연 패널/미니를 알약으로 덮어쓰던 회귀(감사 발견 3건 · 공통 원인)를 여기서 끊는다.
+    closeStartGate();
     // ★v2.0.6: mainDom 권한은 iframe을 펴기 전에 먼저 묻는다 — 리스 확인창(z-50)이 전체화면
     // iframe(z-1000) 뒤에 깔려 승인 자체가 불가능하던 경로(웹 리스 제보 09-05). db 선요청과 같은 자리.
     // 거부해도 진행한다 — acquireFrame이 null을 돌려주고 기존 실패 경로(알약 포기 / 패널 z-1000 유지)가 맡는다.
     if (!state.rootPermAsked) {
       state.rootPermAsked = true;
-      try { await api.requestPluginPermission('mainDom'); } catch (e) { /* 미지원/거부 = 기하 제어 없이 동작 */ }
+      let granted = null;
+      try { granted = await api.requestPluginPermission('mainDom'); } catch (e) { granted = null; /* 미지원 = 기하 제어 없이 동작 */ }
+      // ★v2.0.7: 거부가 돌아오면 호스트 알림(권한 불요)으로 새로고침 안내를 1회 띄운다. 리수는 이 세션의 나머지
+      // 권한 요청도 확인창 없이 거부하므로, 여기서 알리지 않으면 유저는 "확인창이 안 뜬다"만 본다(웹 제보 09-05 2차).
+      if (granted === false && !state.permDeniedNotified) {
+        state.permDeniedNotified = true;
+        // ★감사 반영: 알림은 컨테이너가 숨겨질 때(hideFrame) 띄운다 — 여기서 띄우면 곧 펴지는 전체화면
+        // iframe(z-1000) 아래에 깔려 OK를 누를 수 없고, 패널 안 토스트와 이중 안내가 된다.
+        state.permDeniedPending = true;
+      }
       // 첫 권한(mainDom)이 승인되면 리수는 같은 세션의 나머지 권한을 추가 확인 없이 통과시킨다 —
       // 치환기 등록을 이 뒤에 두어 첫 권한창을 "대화 조작 치환" 문구가 아니라 "메인 DOM 접근" 1회로 만든다.
       try { if (state.ensureHooks) await state.ensureHooks(); } catch (e) { /* 등록 실패는 각 ensure 안에서 기록 */ }
@@ -1021,6 +1040,11 @@
   async function hideFrame() {
     state.shown = false;
     await api.hideContainer();
+    // ★v2.0.7: 권한 거부 안내는 iframe이 내려간 뒤에 1회(호스트 알림 z-50이 iframe 아래에 깔리지 않는 시점).
+    if (state.permDeniedPending) {
+      state.permDeniedPending = false;
+      try { if (api.alert) await api.alert(PERM_DENIED_MSG); } catch (e) { /* 알림 실패는 무시 */ }
+    }
   }
 
   async function showSurface(kind) {
@@ -1994,7 +2018,7 @@
       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
       .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
       .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-      .replace(/(https?:\/\/[^\s<)\]]+)/g, '<button class="adLink" data-action="copy-link" data-url="$1" title="클릭하면 링크를 복사해요">$1</button>');
+      .replace(/(https?:\/\/[^\s<)\]]+)/g, '<button class="ghLink" data-action="copy-link" data-url="$1" title="클릭하면 링크를 복사해요">$1</button>');
   }
 
   // ---- 표 (GFM) ----
@@ -2033,7 +2057,7 @@
       return '<tr>' + tds + '</tr>';
     }).join('');
     // 좁은 팝오버에서 넘칠 때를 대비해 가로 스크롤 상자에 담는다
-    return '<div class="adTableWrap"><table class="adTable"><thead><tr>' + th + '</tr></thead><tbody>' + tb + '</tbody></table></div>';
+    return '<div class="ghTableWrap"><table class="ghTable"><thead><tr>' + th + '</tr></thead><tbody>' + tb + '</tbody></table></div>';
   }
 
   // 코드블록 밖 텍스트용 경량 마크다운 (heading/list/hr/quote/표/문단)
@@ -2069,26 +2093,26 @@
       if (h) {
         closeList();
         const lv = Math.min(5, h[1].length + 2);
-        out.push('<h' + lv + ' class="adH">' + inlineMd(h[2]) + '</h' + lv + '>');
+        out.push('<h' + lv + ' class="ghH">' + inlineMd(h[2]) + '</h' + lv + '>');
         continue;
       }
-      if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) { closeList(); out.push('<hr class="adHr">'); continue; }
+      if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) { closeList(); out.push('<hr class="ghHr">'); continue; }
       const ul = t.match(/^[-*•]\s+(.*)$/);
       if (ul) {
-        if (listType !== 'ul') { closeList(); out.push('<ul class="adUl">'); listType = 'ul'; }
+        if (listType !== 'ul') { closeList(); out.push('<ul class="ghUl">'); listType = 'ul'; }
         out.push('<li>' + inlineMd(ul[1]) + '</li>');
         continue;
       }
       const ol = t.match(/^\d+[.)]\s+(.*)$/);
       if (ol) {
-        if (listType !== 'ol') { closeList(); out.push('<ol class="adOl">'); listType = 'ol'; }
+        if (listType !== 'ol') { closeList(); out.push('<ol class="ghOl">'); listType = 'ol'; }
         out.push('<li>' + inlineMd(ol[1]) + '</li>');
         continue;
       }
       const bq = t.match(/^>\s?(.*)$/);
-      if (bq) { closeList(); out.push('<div class="adBq">' + inlineMd(bq[1]) + '</div>'); continue; }
+      if (bq) { closeList(); out.push('<div class="ghBq">' + inlineMd(bq[1]) + '</div>'); continue; }
       closeList();
-      out.push('<p class="adP">' + inlineMd(t) + '</p>');
+      out.push('<p class="ghP">' + inlineMd(t) + '</p>');
     }
     closeList();
     return out.join('');
@@ -2154,32 +2178,32 @@
       if (p.t === 'code') {
         const id = 'c' + (++codeSeq);
         codeStore.set(id, p.v);
-        return '<div class="adCode"><div class="adCodeBar">'
-          + (state.sendBlocked ? '' : '<button class="adCopyBtn" data-action="send-code" data-code="' + id + '">전송</button>')
-          + '<button class="adCopyBtn" data-action="copy-code" data-code="' + id + '">복사</button></div><pre>' + esc(p.v) + '</pre></div>';
+        return '<div class="ghCode"><div class="ghCodeBar">'
+          + (state.sendBlocked ? '' : '<button class="ghCopyBtn" data-action="send-code" data-code="' + id + '">전송</button>')
+          + '<button class="ghCopyBtn" data-action="copy-code" data-code="' + id + '">복사</button></div><pre>' + esc(p.v) + '</pre></div>';
       }
-      return '<div class="adText">' + mdToHtml(p.v.trim()) + '</div>';
+      return '<div class="ghText">' + mdToHtml(p.v.trim()) + '</div>';
     }).join('');
   }
 
   function renderMessage(m, i, isLast) {
     if (m.role === 'user') {
       const failRow = (m.failed && isLast && !state.sending)
-        ? '<div class="adFailRow">응답을 받지 못했어요'
-          + '<button class="adAct" data-action="msg-retry" data-idx="' + i + '">재시도</button>'
-          + '<button class="adAct" data-action="msg-withdraw" data-idx="' + i + '">지우고 입력란으로</button></div>'
+        ? '<div class="ghFailRow">응답을 받지 못했어요'
+          + '<button class="ghAct" data-action="msg-retry" data-idx="' + i + '">재시도</button>'
+          + '<button class="ghAct" data-action="msg-withdraw" data-idx="' + i + '">지우고 입력란으로</button></div>'
         : '';
-      return '<div class="adMsg adMsgUser"><div class="adBubbleWrap adWrapUser">'
-        + '<div class="adBubbleUser">' + renderRich(m.content) + '</div>'
-        + '<div class="adMsgActs adActsUser"><button class="adAct" data-action="msg-copy" data-idx="' + i + '">복사</button></div>'
+      return '<div class="ghMsg ghMsgUser"><div class="ghBubbleWrap ghWrapUser">'
+        + '<div class="ghBubbleUser">' + renderRich(m.content) + '</div>'
+        + '<div class="ghMsgActs ghActsUser"><button class="ghAct" data-action="msg-copy" data-idx="' + i + '">복사</button></div>'
         + failRow
         + '</div></div>';
     }
-    let html = '<div class="adMsg adMsgAd"><div class="adWho">AD</div><div class="adBubbleAd">';
+    let html = '<div class="ghMsg ghMsgAd"><div class="ghWho">AD</div><div class="ghBubbleAd">';
     if (m.reasoning) {
-      html += '<div class="adThink" data-open="0">'
-        + '<button class="adThinkToggle" data-action="toggle-think" data-idx="' + i + '">사고 과정 보기 ▸</button>'
-        + '<div class="adThinkBody" style="display:none">' + inlineFmt(m.reasoning) + '</div>'
+      html += '<div class="ghThink" data-open="0">'
+        + '<button class="ghThinkToggle" data-action="toggle-think" data-idx="' + i + '">사고 과정 보기 ▸</button>'
+        + '<div class="ghThinkBody" style="display:none">' + inlineFmt(m.reasoning) + '</div>'
         + '</div>';
     }
     const ex = extractUpdates(m.content);
@@ -2200,23 +2224,23 @@
         const bits = [];
         if (u.keys !== null && u.keys !== undefined) bits.push('키: ' + (u.keys ? esc(u.keys) : '(없음)'));
         if (u.alwaysActive !== null) bits.push(u.alwaysActive ? '항상 활성 켬' : '항상 활성 끔');
-        if (bits.length) meta = '<div class="adUpdMeta">' + bits.join(' · ') + '</div>';
+        if (bits.length) meta = '<div class="ghUpdMeta">' + bits.join(' · ') + '</div>';
       }
 
       const preview = (u.kind === 'lore' && u.op === 'delete')
         ? '이 항목을 지웁니다. 되돌리기로 복구할 수 있어요.'
         : esc(u.text.slice(0, 200)) + (u.text.length > 200 ? '…' : '');
 
-      html += '<div class="adUpd"><span class="adUpdLabel">' + label + '</span>'
-        + '<button class="adHBtn adSmall" data-action="apply-upd" data-upd="' + uid + '">적용</button>'
+      html += '<div class="ghUpd"><span class="ghUpdLabel">' + label + '</span>'
+        + '<button class="ghHBtn ghSmall" data-action="apply-upd" data-upd="' + uid + '">적용</button>'
         + meta
-        + '<div class="adUpdBody">' + preview + '</div></div>';
+        + '<div class="ghUpdBody">' + preview + '</div></div>';
     }
     html += '</div>';
-    html += '<div class="adMsgActs">'
-      + '<button class="adAct" data-action="msg-copy" data-idx="' + i + '">복사</button>'
-      + (isLast && !state.sending ? '<button class="adAct" data-action="msg-reroll">다시 시도</button>' : '')
-      + '<button class="adAct" data-action="msg-branch" data-idx="' + i + '">새 회의</button>'
+    html += '<div class="ghMsgActs">'
+      + '<button class="ghAct" data-action="msg-copy" data-idx="' + i + '">복사</button>'
+      + (isLast && !state.sending ? '<button class="ghAct" data-action="msg-reroll">다시 시도</button>' : '')
+      + '<button class="ghAct" data-action="msg-branch" data-idx="' + i + '">새 회의</button>'
       + '</div>';
     html += '</div>';
     return html;
@@ -2231,240 +2255,240 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { background: transparent; }
     body { font-family: 'Pretendard', 'Malgun Gothic', system-ui, sans-serif; }
-    .adRoot { position: fixed; inset: 0; background: rgba(0,0,0,.22); display: flex; align-items: center; justify-content: center; z-index: 100; }
-    .adPanel { position: relative; width: min(920px, 94vw); height: min(860px, 92vh); border-radius: 20px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 18px 60px rgba(0,0,0,.35); }
-    body[data-theme="light"] .adPanel { background: #faf7f2; color: #2b2a28; }
-    body[data-theme="dark"] .adPanel { background: #24211e; color: #e8e4de; }
+    .ghRoot { position: fixed; inset: 0; background: rgba(0,0,0,.22); display: flex; align-items: center; justify-content: center; z-index: 100; }
+    .ghPanel { position: relative; width: min(920px, 94vw); height: min(860px, 92vh); border-radius: 20px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 18px 60px rgba(0,0,0,.35); }
+    body[data-theme="light"] .ghPanel { background: #faf7f2; color: #2b2a28; }
+    body[data-theme="dark"] .ghPanel { background: #24211e; color: #e8e4de; }
 
-    .adHeader { display: flex; align-items: center; gap: 8px; padding: 16px 20px; flex: 0 0 auto; }
-    .adTitle { font-family: Georgia, 'Times New Roman', serif; font-size: 21px; font-weight: 700; letter-spacing: .2px; flex: 0 0 auto; }
-    .adRoomLabel { font-size: 12.5px; color: var(--adSub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; min-width: 0; }
-    .adHSpace { flex: 1 1 0; min-width: 8px; }
+    .ghHeader { display: flex; align-items: center; gap: 8px; padding: 16px 20px; flex: 0 0 auto; }
+    .ghTitle { font-family: Georgia, 'Times New Roman', serif; font-size: 21px; font-weight: 700; letter-spacing: .2px; flex: 0 0 auto; }
+    .ghRoomLabel { font-size: 12.5px; color: var(--ghSub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; min-width: 0; }
+    .ghHSpace { flex: 1 1 0; min-width: 8px; }
     @media (max-width: 600px) {
-      .adHeader { flex-wrap: wrap; padding-bottom: 8px; }
-      .adRoomLabel { order: 10; flex-basis: 100%; }
+      .ghHeader { flex-wrap: wrap; padding-bottom: 8px; }
+      .ghRoomLabel { order: 10; flex-basis: 100%; }
     }
-    .adHBtn { border: 1px solid var(--adBorder); background: var(--adBtnBg); color: inherit; border-radius: 999px; padding: 7px 14px; font-size: 13px; cursor: pointer; white-space: nowrap; }
-    .adHBtn.adAccent { background: #a4707e; border-color: #a4707e; color: #fff; }
+    .ghHBtn { border: 1px solid var(--ghBorder); background: var(--ghBtnBg); color: inherit; border-radius: 999px; padding: 7px 14px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+    .ghHBtn.ghAccent { background: #a4707e; border-color: #a4707e; color: #fff; }
     /* 주 행위 — 1차 LNB의 채운 강조와 겹치지 않게 테두리로만 강조한다 */
-    .adHBtn.adOutline { background: var(--adBtnBg); border-color: #a4707e; color: #a4707e; font-weight: 600; }
-    .adHBtn.adOutline:hover { background: #a4707e; color: #fff; }
-    .adHBtn.adIcon { width: 34px; height: 34px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
-    body[data-theme="light"] .adPanel { --adBorder: #e2dcd2; --adBtnBg: #fffdf9; --adSub: #8a857c; --adCard: #fffdf9; --adCode: #f0ece4; --adInput: #ffffff; }
-    body[data-theme="dark"] .adPanel { --adBorder: #3c3833; --adBtnBg: #2c2926; --adSub: #9a948a; --adCard: #2a2723; --adCode: #1d1b18; --adInput: #201d1a; }
+    .ghHBtn.ghOutline { background: var(--ghBtnBg); border-color: #a4707e; color: #a4707e; font-weight: 600; }
+    .ghHBtn.ghOutline:hover { background: #a4707e; color: #fff; }
+    .ghHBtn.ghIcon { width: 34px; height: 34px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+    body[data-theme="light"] .ghPanel { --ghBorder: #e2dcd2; --ghBtnBg: #fffdf9; --ghSub: #8a857c; --ghCard: #fffdf9; --ghCode: #f0ece4; --ghInput: #ffffff; }
+    body[data-theme="dark"] .ghPanel { --ghBorder: #3c3833; --ghBtnBg: #2c2926; --ghSub: #9a948a; --ghCard: #2a2723; --ghCode: #1d1b18; --ghInput: #201d1a; }
 
-    .adBody { flex: 1 1 auto; overflow-y: auto; padding: 4px 20px 20px; }
+    .ghBody { flex: 1 1 auto; overflow-y: auto; padding: 4px 20px 20px; }
 
     /* 위계 3층: ①1차 LNB = 채운 알약 + 아래 구분선으로 영역을 닫는다
               ②2차 LNB = 밑줄 탭(배경 없음) — 1차와 형태 자체가 다르다
               ③행위 버튼 = 알약도 탭도 아닌 고스트/강조 버튼 */
-    .adTabs { display: flex; align-items: center; gap: 6px; padding: 0 20px 10px; flex: 0 0 auto; border-bottom: 1px solid var(--adBorder); }
-    .adTab { border: 1px solid var(--adBorder); background: var(--adBtnBg); color: inherit; border-radius: 999px; padding: 7px 16px; font-size: 13.5px; cursor: pointer; white-space: nowrap; }
-    .adTabs { flex-wrap: wrap; }
-    .adTab.adActive { background: #a4707e; border-color: #a4707e; color: #fff; font-weight: 600; }
-    .adSubBar { display: flex; align-items: center; gap: 10px; padding: 10px 20px 12px; margin-bottom: 6px; flex: 0 0 auto; }
-    .adSubTitle { flex: 1; font-size: 13px; color: var(--adSub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
-    .adTitleClick { cursor: pointer; }
-    .adTitleClick:hover { color: inherit; text-decoration: underline dotted; }
-    .adTitleInput { flex: 1; border: 1px solid var(--adBorder); border-radius: 8px; background: var(--adInput); color: inherit; padding: 6px 10px; font-size: 13px; text-align: center; }
+    .ghTabs { display: flex; align-items: center; gap: 6px; padding: 0 20px 10px; flex: 0 0 auto; border-bottom: 1px solid var(--ghBorder); }
+    .ghTab { border: 1px solid var(--ghBorder); background: var(--ghBtnBg); color: inherit; border-radius: 999px; padding: 7px 16px; font-size: 13.5px; cursor: pointer; white-space: nowrap; }
+    .ghTabs { flex-wrap: wrap; }
+    .ghTab.ghActive { background: #a4707e; border-color: #a4707e; color: #fff; font-weight: 600; }
+    .ghSubBar { display: flex; align-items: center; gap: 10px; padding: 10px 20px 12px; margin-bottom: 6px; flex: 0 0 auto; }
+    .ghSubTitle { flex: 1; font-size: 13px; color: var(--ghSub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
+    .ghTitleClick { cursor: pointer; }
+    .ghTitleClick:hover { color: inherit; text-decoration: underline dotted; }
+    .ghTitleInput { flex: 1; border: 1px solid var(--ghBorder); border-radius: 8px; background: var(--ghInput); color: inherit; padding: 6px 10px; font-size: 13px; text-align: center; }
 
-    .adH { margin: 12px 0 6px; }
-    h3.adH { font-size: 16px; } h4.adH { font-size: 14.5px; } h5.adH { font-size: 14px; }
-    .adP { margin: 6px 0; }
-    .adUl, .adOl { margin: 6px 0 6px 22px; }
-    .adUl li, .adOl li { margin: 3px 0; }
-    .adHr { border: none; border-top: 1px solid var(--adBorder); margin: 12px 0; }
-    .adBq { border-left: 3px solid var(--adBorder); padding-left: 10px; color: var(--adSub); margin: 6px 0; }
-    .adTableWrap { margin: 8px 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    .adTable { border-collapse: collapse; font-size: 12px; line-height: 1.5; min-width: 100%; }
-    .adTable th, .adTable td { border: 1px solid var(--adBorder); padding: 5px 8px; text-align: left; vertical-align: top; word-break: break-word; }
-    .adTable th { background: var(--adCard); font-weight: 600; white-space: nowrap; }
+    .ghH { margin: 12px 0 6px; }
+    h3.ghH { font-size: 16px; } h4.ghH { font-size: 14.5px; } h5.ghH { font-size: 14px; }
+    .ghP { margin: 6px 0; }
+    .ghUl, .ghOl { margin: 6px 0 6px 22px; }
+    .ghUl li, .ghOl li { margin: 3px 0; }
+    .ghHr { border: none; border-top: 1px solid var(--ghBorder); margin: 12px 0; }
+    .ghBq { border-left: 3px solid var(--ghBorder); padding-left: 10px; color: var(--ghSub); margin: 6px 0; }
+    .ghTableWrap { margin: 8px 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .ghTable { border-collapse: collapse; font-size: 12px; line-height: 1.5; min-width: 100%; }
+    .ghTable th, .ghTable td { border: 1px solid var(--ghBorder); padding: 5px 8px; text-align: left; vertical-align: top; word-break: break-word; }
+    .ghTable th { background: var(--ghCard); font-weight: 600; white-space: nowrap; }
 
-    .adArcTab { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 20px 20px; overflow-y: auto; }
-    .adAdaptBar { display: flex; gap: 10px; align-items: flex-end; flex: 0 0 auto; }
-    .adAdaptBar textarea { flex: 1; min-height: 46px; max-height: 160px; resize: vertical; border: 1px solid var(--adBorder); border-radius: 12px; background: var(--adInput); color: inherit; padding: 12px 14px; font-size: 14px; line-height: 1.5; }
-    .adSetTitle { font-size: 16px; font-weight: 700; }
-    .adArcStatus { font-size: 12.5px; color: var(--adSub); }
-    .adArcBig { flex: 1 1 auto; min-height: 300px; resize: vertical; border: 1px solid var(--adBorder); border-radius: 10px; background: var(--adInput); color: inherit; padding: 12px; font-size: 13.5px; line-height: 1.6; }
-    .adArcView.adArcGrow { flex: 1 1 0; min-height: 200px; max-height: none; }
+    .ghArcTab { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 20px 20px; overflow-y: auto; }
+    .ghAdaptBar { display: flex; gap: 10px; align-items: flex-end; flex: 0 0 auto; }
+    .ghAdaptBar textarea { flex: 1; min-height: 46px; max-height: 160px; resize: vertical; border: 1px solid var(--ghBorder); border-radius: 12px; background: var(--ghInput); color: inherit; padding: 12px 14px; font-size: 14px; line-height: 1.5; }
+    .ghSetTitle { font-size: 16px; font-weight: 700; }
+    .ghArcStatus { font-size: 12.5px; color: var(--ghSub); }
+    .ghArcBig { flex: 1 1 auto; min-height: 300px; resize: vertical; border: 1px solid var(--ghBorder); border-radius: 10px; background: var(--ghInput); color: inherit; padding: 12px; font-size: 13.5px; line-height: 1.6; }
+    .ghArcView.ghArcGrow { flex: 1 1 0; min-height: 200px; max-height: none; }
 
-    .adArcView { border: 1px solid var(--adBorder); border-radius: 8px; background: var(--adInput); padding: 10px 12px; font-size: 13px; line-height: 1.6; max-height: 240px; overflow-y: auto; }
+    .ghArcView { border: 1px solid var(--ghBorder); border-radius: 8px; background: var(--ghInput); padding: 10px 12px; font-size: 13px; line-height: 1.6; max-height: 240px; overflow-y: auto; }
 
-    .adList { display: flex; flex-direction: column; gap: 10px; }
-    .adItem { border: 1px solid var(--adBorder); background: var(--adCard); border-radius: 12px; padding: 13px 16px; cursor: pointer; display: flex; align-items: center; gap: 12px; }
-    .adItem .adMeta { margin-left: auto; color: var(--adSub); font-size: 12px; white-space: nowrap; }
-    .adEmpty { text-align: center; color: var(--adSub); padding: 80px 0 24px; font-size: 14px; }
-    .adNewRow { display: flex; justify-content: center; padding: 14px 0; }
-    .adFailRow { display: flex; gap: 6px; align-items: center; justify-content: flex-end; color: #c0564e; font-size: 12px; margin-top: 4px; }
+    .ghList { display: flex; flex-direction: column; gap: 10px; }
+    .ghItem { border: 1px solid var(--ghBorder); background: var(--ghCard); border-radius: 12px; padding: 13px 16px; cursor: pointer; display: flex; align-items: center; gap: 12px; }
+    .ghItem .ghMeta { margin-left: auto; color: var(--ghSub); font-size: 12px; white-space: nowrap; }
+    .ghEmpty { text-align: center; color: var(--ghSub); padding: 80px 0 24px; font-size: 14px; }
+    .ghNewRow { display: flex; justify-content: center; padding: 14px 0; }
+    .ghFailRow { display: flex; gap: 6px; align-items: center; justify-content: flex-end; color: #c0564e; font-size: 12px; margin-top: 4px; }
 
-    .adMsg { display: flex; margin: 12px 0; }
-    .adMsgUser { justify-content: flex-end; }
-    .adBubbleWrap { display: flex; flex-direction: column; max-width: 78%; }
-    .adWrapUser { align-items: flex-end; }
-    .adWrapUser .adBubbleUser { max-width: 100%; }
-    .adMsgActs { display: flex; gap: 4px; margin: 3px 0 0 2px; }
-    .adActsUser { justify-content: flex-end; margin-right: 2px; }
-    .adAct { border: none; background: none; color: var(--adSub); font-size: 12px; cursor: pointer; padding: 3px 7px; border-radius: 6px; }
-    .adAct:hover { background: var(--adBtnBg); }
-    .adSmall { padding: 4px 10px; font-size: 12px; }
-    .adLink { border: none; background: none; color: #a4707e; text-decoration: underline; cursor: pointer; font-size: inherit; padding: 0; word-break: break-all; }
-    .adBubbleUser { max-width: 78%; background: #a4707e; color: #fff; border-radius: 14px 14px 4px 14px; padding: 11px 14px; font-size: 14px; line-height: 1.6; }
-    .adMsgAd { flex-direction: column; align-items: flex-start; }
-    .adWho { font-size: 11.5px; font-weight: 700; color: var(--adSub); margin: 0 0 4px 4px; letter-spacing: .5px; }
-    .adBubbleAd { max-width: 92%; background: var(--adCard); border: 1px solid var(--adBorder); border-radius: 4px 14px 14px 14px; padding: 12px 15px; font-size: 14px; line-height: 1.65; }
-    .adText + .adText { margin-top: 8px; }
-    .adCode { position: relative; margin: 10px 0; border: 1px solid var(--adBorder); border-radius: 10px; background: var(--adCode); }
-    .adCode pre { padding: 8px 14px 12px; overflow-x: auto; font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; font-family: Consolas, 'D2Coding', monospace; }
-    .adCodeBar { display: flex; justify-content: flex-end; gap: 6px; padding: 8px 8px 0; }
-    .adCopyBtn { border: 1px solid var(--adBorder); background: var(--adBtnBg); color: inherit; border-radius: 7px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
-    .adThink { margin-bottom: 8px; }
-    .adThinkToggle { border: none; background: none; color: var(--adSub); cursor: pointer; font-size: 12px; padding: 0; }
-    .adThinkBody { margin-top: 6px; padding: 10px 12px; border-left: 3px solid var(--adBorder); color: var(--adSub); font-size: 12.5px; line-height: 1.55; }
-    .adPending { color: var(--adSub); font-size: 13px; padding: 6px 4px; }
+    .ghMsg { display: flex; margin: 12px 0; }
+    .ghMsgUser { justify-content: flex-end; }
+    .ghBubbleWrap { display: flex; flex-direction: column; max-width: 78%; }
+    .ghWrapUser { align-items: flex-end; }
+    .ghWrapUser .ghBubbleUser { max-width: 100%; }
+    .ghMsgActs { display: flex; gap: 4px; margin: 3px 0 0 2px; }
+    .ghActsUser { justify-content: flex-end; margin-right: 2px; }
+    .ghAct { border: none; background: none; color: var(--ghSub); font-size: 12px; cursor: pointer; padding: 3px 7px; border-radius: 6px; }
+    .ghAct:hover { background: var(--ghBtnBg); }
+    .ghSmall { padding: 4px 10px; font-size: 12px; }
+    .ghLink { border: none; background: none; color: #a4707e; text-decoration: underline; cursor: pointer; font-size: inherit; padding: 0; word-break: break-all; }
+    .ghBubbleUser { max-width: 78%; background: #a4707e; color: #fff; border-radius: 14px 14px 4px 14px; padding: 11px 14px; font-size: 14px; line-height: 1.6; }
+    .ghMsgAd { flex-direction: column; align-items: flex-start; }
+    .ghWho { font-size: 11.5px; font-weight: 700; color: var(--ghSub); margin: 0 0 4px 4px; letter-spacing: .5px; }
+    .ghBubbleAd { max-width: 92%; background: var(--ghCard); border: 1px solid var(--ghBorder); border-radius: 4px 14px 14px 14px; padding: 12px 15px; font-size: 14px; line-height: 1.65; }
+    .ghText + .ghText { margin-top: 8px; }
+    .ghCode { position: relative; margin: 10px 0; border: 1px solid var(--ghBorder); border-radius: 10px; background: var(--ghCode); }
+    .ghCode pre { padding: 8px 14px 12px; overflow-x: auto; font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; font-family: Consolas, 'D2Coding', monospace; }
+    .ghCodeBar { display: flex; justify-content: flex-end; gap: 6px; padding: 8px 8px 0; }
+    .ghCopyBtn { border: 1px solid var(--ghBorder); background: var(--ghBtnBg); color: inherit; border-radius: 7px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+    .ghThink { margin-bottom: 8px; }
+    .ghThinkToggle { border: none; background: none; color: var(--ghSub); cursor: pointer; font-size: 12px; padding: 0; }
+    .ghThinkBody { margin-top: 6px; padding: 10px 12px; border-left: 3px solid var(--ghBorder); color: var(--ghSub); font-size: 12.5px; line-height: 1.55; }
+    .ghPending { color: var(--ghSub); font-size: 13px; padding: 6px 4px; }
 
-    .adInputBar { flex: 0 0 auto; display: flex; gap: 10px; padding: 14px 20px 8px; border-top: 1px solid var(--adBorder); align-items: stretch; }
-    .adInputBar textarea { flex: 1; min-height: 88px; max-height: 200px; resize: vertical; border: 1px solid var(--adBorder); border-radius: 12px; background: var(--adInput); color: inherit; padding: 12px 14px; font-size: 14px; line-height: 1.5; }
-    .adSendCol { display: flex; flex-direction: column; gap: 6px; flex: 0 0 auto; justify-content: flex-end; }
-    .adModelSel { border: 1px solid var(--adBorder); background: var(--adBtnBg); color: inherit; border-radius: 10px; padding: 8px; font-size: 13px; }
-    .adSend { background: #a4707e; border: none; color: #fff; border-radius: 12px; padding: 12px 20px; font-size: 14px; cursor: pointer; flex: 1; }
-    .adSend:disabled { opacity: .5; cursor: default; }
+    .ghInputBar { flex: 0 0 auto; display: flex; gap: 10px; padding: 14px 20px 8px; border-top: 1px solid var(--ghBorder); align-items: stretch; }
+    .ghInputBar textarea { flex: 1; min-height: 88px; max-height: 200px; resize: vertical; border: 1px solid var(--ghBorder); border-radius: 12px; background: var(--ghInput); color: inherit; padding: 12px 14px; font-size: 14px; line-height: 1.5; }
+    .ghSendCol { display: flex; flex-direction: column; gap: 6px; flex: 0 0 auto; justify-content: flex-end; }
+    .ghModelSel { border: 1px solid var(--ghBorder); background: var(--ghBtnBg); color: inherit; border-radius: 10px; padding: 8px; font-size: 13px; }
+    .ghSend { background: #a4707e; border: none; color: #fff; border-radius: 12px; padding: 12px 20px; font-size: 14px; cursor: pointer; flex: 1; }
+    .ghSend:disabled { opacity: .5; cursor: default; }
 
-    .adSet { display: flex; flex-direction: column; gap: 0; max-width: 620px; margin: 8px auto; }
-    .adSetBlock { padding: 18px 0; border-bottom: 1px solid var(--adBorder); display: flex; flex-direction: column; gap: 10px; }
-    .adSetBlock:last-child { border-bottom: none; }
-    .adDim { color: var(--adSub); font-size: 12px; font-weight: 400; }
-    .adSwitch, .adSetRow label.adSwitch { position: relative; display: inline-block; width: 44px; height: 24px; flex: 0 0 44px; }
-    .adSwitch input { opacity: 0; width: 0; height: 0; }
-    .adSlider { position: absolute; inset: 0; background: var(--adBorder); border-radius: 999px; transition: background .15s; cursor: pointer; }
-    .adSlider::before { content: ''; position: absolute; width: 18px; height: 18px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: transform .15s; }
-    .adSwitch input:checked + .adSlider { background: #a4707e; }
-    .adSwitch input:checked + .adSlider::before { transform: translateX(20px); }
-    .adSetRow { display: flex; align-items: center; gap: 12px; font-size: 14px; }
-    .adSetRow label { flex: 1; }
-    .adSetRow select, .adSetRow input[type="number"] { border: 1px solid var(--adBorder); background: var(--adInput); color: inherit; border-radius: 8px; padding: 8px 10px; font-size: 13.5px; }
-    .adSetNote { font-size: 12px; color: var(--adSub); }
-    .adAdv { border: 1px solid var(--adBorder); border-radius: 12px; background: var(--adCard); }
-    .adAdvHead { padding: 12px 15px; font-size: 13.5px; font-weight: 600; cursor: pointer; }
-    .adAdvBody { padding: 0 15px 14px; display: flex; flex-direction: column; gap: 10px; }
-    .adAdvBody textarea { width: 100%; min-height: 200px; resize: vertical; border: 1px solid var(--adBorder); border-radius: 8px; background: var(--adInput); color: inherit; padding: 10px; font-size: 12.5px; font-family: Consolas, monospace; line-height: 1.5; }
-    .adRow { display: flex; gap: 8px; justify-content: flex-end; }
-    .adDanger { color: #c0564e; }
-    .adConfirm { border: 1px solid #c0564e55; border-radius: 12px; padding: 14px; background: var(--adCard); font-size: 13.5px; display: flex; flex-direction: column; gap: 10px; }
+    .ghSet { display: flex; flex-direction: column; gap: 0; max-width: 620px; margin: 8px auto; }
+    .ghSetBlock { padding: 18px 0; border-bottom: 1px solid var(--ghBorder); display: flex; flex-direction: column; gap: 10px; }
+    .ghSetBlock:last-child { border-bottom: none; }
+    .ghDim { color: var(--ghSub); font-size: 12px; font-weight: 400; }
+    .ghSwitch, .ghSetRow label.ghSwitch { position: relative; display: inline-block; width: 44px; height: 24px; flex: 0 0 44px; }
+    .ghSwitch input { opacity: 0; width: 0; height: 0; }
+    .ghSlider { position: absolute; inset: 0; background: var(--ghBorder); border-radius: 999px; transition: background .15s; cursor: pointer; }
+    .ghSlider::before { content: ''; position: absolute; width: 18px; height: 18px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: transform .15s; }
+    .ghSwitch input:checked + .ghSlider { background: #a4707e; }
+    .ghSwitch input:checked + .ghSlider::before { transform: translateX(20px); }
+    .ghSetRow { display: flex; align-items: center; gap: 12px; font-size: 14px; }
+    .ghSetRow label { flex: 1; }
+    .ghSetRow select, .ghSetRow input[type="number"] { border: 1px solid var(--ghBorder); background: var(--ghInput); color: inherit; border-radius: 8px; padding: 8px 10px; font-size: 13.5px; }
+    .ghSetNote { font-size: 12px; color: var(--ghSub); }
+    .ghAdv { border: 1px solid var(--ghBorder); border-radius: 12px; background: var(--ghCard); }
+    .ghAdvHead { padding: 12px 15px; font-size: 13.5px; font-weight: 600; cursor: pointer; }
+    .ghAdvBody { padding: 0 15px 14px; display: flex; flex-direction: column; gap: 10px; }
+    .ghAdvBody textarea { width: 100%; min-height: 200px; resize: vertical; border: 1px solid var(--ghBorder); border-radius: 8px; background: var(--ghInput); color: inherit; padding: 10px; font-size: 12.5px; font-family: Consolas, monospace; line-height: 1.5; }
+    .ghRow { display: flex; gap: 8px; justify-content: flex-end; }
+    .ghDanger { color: #c0564e; }
+    .ghConfirm { border: 1px solid #c0564e55; border-radius: 12px; padding: 14px; background: var(--ghCard); font-size: 13.5px; display: flex; flex-direction: column; gap: 10px; }
 
-    .adToast { position: absolute; bottom: 26px; left: 50%; transform: translateX(-50%); background: #2b2a28; color: #fff; border-radius: 999px; padding: 9px 18px; font-size: 13px; opacity: .95; z-index: 10; }
+    .ghToast { position: absolute; bottom: 26px; left: 50%; transform: translateX(-50%); background: #2b2a28; color: #fff; border-radius: 999px; padding: 9px 18px; font-size: 13px; opacity: .95; z-index: 10; }
 
-    .adCueList { display: flex; flex-direction: column; gap: 8px; }
-    .adCueItem { border: 1px solid var(--adBorder); background: var(--adCard); border-radius: 12px; }
-    .adCueHead { display: flex; align-items: center; gap: 10px; padding: 11px 14px; cursor: pointer; }
-    .adCueNum { flex: 0 0 auto; min-width: 24px; height: 24px; border-radius: 999px; background: #a4707e; color: #fff; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
-    .adCuePreview { flex: 1; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .adCueMove { flex: 0 0 auto; display: flex; gap: 2px; }
-    .adCueBody { padding: 0 14px 12px; display: flex; flex-direction: column; gap: 8px; }
-    .adCueEdit { width: 100%; min-height: 110px; resize: vertical; border: 1px solid var(--adBorder); border-radius: 8px; background: var(--adInput); color: inherit; padding: 10px; font-size: 13.5px; line-height: 1.6; }
-    .adCueNote { border: 1px solid var(--adBorder); border-radius: 8px; background: var(--adInput); color: inherit; padding: 8px 10px; font-size: 12.5px; }
-    .adCueOpts { border: 1px solid var(--adBorder); background: var(--adCard); border-radius: 12px; padding: 10px 14px; display: flex; flex-direction: column; gap: 7px; flex: 0 0 auto; }
-    .adCueOptRow { display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
-    .adCueOptLabel { flex: 0 0 76px; font-weight: 600; }
-    .adCueOptCtl { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; }
-    .adCueOptCtl input[type="number"] { width: 58px; border: 1px solid var(--adBorder); background: var(--adInput); color: inherit; border-radius: 8px; padding: 6px 8px; font-size: 13px; }
-    .adCueOptGuide { flex: 1 1 200px; font-size: 11.5px; color: var(--adSub); min-width: 0; }
-    .adCueOptFoot { flex: 0 0 auto; font-size: 11.5px; color: var(--adSub); margin-top: 2px; }
-    .adCueDone { flex: 0 0 auto; width: 16px; height: 16px; accent-color: #6f8fb5; cursor: pointer; margin: 0; }
-    .adCueNum.adCueNext { box-shadow: 0 0 0 2px #6f8fb5; }
-    .adCuePreview.adCueDim { color: var(--adSub); }
-    .adTokLine { font-size: 11.5px; color: var(--adSub); padding: 0 20px 12px; flex: 0 0 auto; }
-    .adUpd { margin: 10px 0; border: 1px dashed #a4707e88; border-radius: 10px; padding: 10px 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-    .adUpdLabel { font-weight: 700; font-size: 13px; color: #a4707e; }
-    .adUpdBody { flex-basis: 100%; font-size: 12.5px; color: var(--adSub); line-height: 1.5; }
-    .adUpdMeta { flex-basis: 100%; font-size: 12px; color: #a4707e; }
+    .ghCueList { display: flex; flex-direction: column; gap: 8px; }
+    .ghCueItem { border: 1px solid var(--ghBorder); background: var(--ghCard); border-radius: 12px; }
+    .ghCueHead { display: flex; align-items: center; gap: 10px; padding: 11px 14px; cursor: pointer; }
+    .ghCueNum { flex: 0 0 auto; min-width: 24px; height: 24px; border-radius: 999px; background: #a4707e; color: #fff; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
+    .ghCuePreview { flex: 1; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ghCueMove { flex: 0 0 auto; display: flex; gap: 2px; }
+    .ghCueBody { padding: 0 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+    .ghCueEdit { width: 100%; min-height: 110px; resize: vertical; border: 1px solid var(--ghBorder); border-radius: 8px; background: var(--ghInput); color: inherit; padding: 10px; font-size: 13.5px; line-height: 1.6; }
+    .ghCueNote { border: 1px solid var(--ghBorder); border-radius: 8px; background: var(--ghInput); color: inherit; padding: 8px 10px; font-size: 12.5px; }
+    .ghCueOpts { border: 1px solid var(--ghBorder); background: var(--ghCard); border-radius: 12px; padding: 10px 14px; display: flex; flex-direction: column; gap: 7px; flex: 0 0 auto; }
+    .ghCueOptRow { display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
+    .ghCueOptLabel { flex: 0 0 76px; font-weight: 600; }
+    .ghCueOptCtl { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; }
+    .ghCueOptCtl input[type="number"] { width: 58px; border: 1px solid var(--ghBorder); background: var(--ghInput); color: inherit; border-radius: 8px; padding: 6px 8px; font-size: 13px; }
+    .ghCueOptGuide { flex: 1 1 200px; font-size: 11.5px; color: var(--ghSub); min-width: 0; }
+    .ghCueOptFoot { flex: 0 0 auto; font-size: 11.5px; color: var(--ghSub); margin-top: 2px; }
+    .ghCueDone { flex: 0 0 auto; width: 16px; height: 16px; accent-color: #6f8fb5; cursor: pointer; margin: 0; }
+    .ghCueNum.ghCueNext { box-shadow: 0 0 0 2px #6f8fb5; }
+    .ghCuePreview.ghCueDim { color: var(--ghSub); }
+    .ghTokLine { font-size: 11.5px; color: var(--ghSub); padding: 0 20px 12px; flex: 0 0 auto; }
+    .ghUpd { margin: 10px 0; border: 1px dashed #a4707e88; border-radius: 10px; padding: 10px 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .ghUpdLabel { font-weight: 700; font-size: 13px; color: #a4707e; }
+    .ghUpdBody { flex-basis: 100%; font-size: 12.5px; color: var(--ghSub); line-height: 1.5; }
+    .ghUpdMeta { flex-basis: 100%; font-size: 12px; color: #a4707e; }
 
     /* ---------- 로어북 ---------- */
-    .adLoreScope { display: flex; align-items: flex-end; gap: 0; margin: 8px 0 12px; border-bottom: 1px solid var(--adBorder); }
-    .adLoreScopeGap { flex: 1 1 auto; }
-    .adSubTab { border: none; background: none; color: var(--adSub); padding: 4px 2px 6px; margin-right: 18px; font-size: 12.5px; cursor: pointer; white-space: nowrap; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-    .adSubTab:hover { color: inherit; }
-    .adSubTab.adActive { color: inherit; font-weight: 700; border-bottom-color: #a4707e; }
-    .adSubTab .adCnt { font-size: 11.5px; color: var(--adSub); margin-left: 5px; font-weight: 400; }
-    .adSubTab.adActive .adCnt { color: #a4707e; }
+    .ghLoreScope { display: flex; align-items: flex-end; gap: 0; margin: 8px 0 12px; border-bottom: 1px solid var(--ghBorder); }
+    .ghLoreScopeGap { flex: 1 1 auto; }
+    .ghSubTab { border: none; background: none; color: var(--ghSub); padding: 4px 2px 6px; margin-right: 18px; font-size: 12.5px; cursor: pointer; white-space: nowrap; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+    .ghSubTab:hover { color: inherit; }
+    .ghSubTab.ghActive { color: inherit; font-weight: 700; border-bottom-color: #a4707e; }
+    .ghSubTab .ghCnt { font-size: 11.5px; color: var(--ghSub); margin-left: 5px; font-weight: 400; }
+    .ghSubTab.ghActive .ghCnt { color: #a4707e; }
     /* 행위 버튼 — 드물게 쓰는 복구 동작이라 가장 낮은 무게 */
-    .adGhost { border: 1px solid transparent; background: none; color: var(--adSub); border-radius: 999px; padding: 5px 11px; font-size: 12px; cursor: pointer; white-space: nowrap; margin-bottom: 5px; }
-    .adGhost:hover { border-color: var(--adBorder); color: inherit; }
-    .adLoreBar { display: flex; gap: 8px; align-items: center; margin: 12px 0 10px; }
-    .adLoreBar .adLoreIn { flex: 1 1 auto; }
-    .adLoreIn { border: 1px solid var(--adBorder); background: var(--adInput); color: inherit; border-radius: 8px; padding: 8px 10px; font-size: 13px; width: 100%; font-family: inherit; }
-    .adLoreIn[disabled] { opacity: .5; }
-    .adLoreLbl { display: block; font-size: 12px; color: var(--adSub); margin: 10px 0 4px; }
-    .adLoreArea { width: 100%; min-height: 190px; resize: vertical; border: 1px solid var(--adBorder); border-radius: 8px; background: var(--adInput); color: inherit; padding: 10px; font-size: 12.5px; line-height: 1.6; font-family: Consolas, 'D2Coding', monospace; }
-    .adLoreRow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
-    .adLoreRow.adLoreEnd { justify-content: flex-end; }
-    .adLoreItem { border: 1px solid var(--adBorder); background: var(--adCard); border-radius: 12px; margin-bottom: 8px; }
-    .adLoreItem.adLoreOpen { border-color: #a4707e88; }
-    .adLoreHead { display: flex; align-items: center; gap: 8px; padding: 11px 14px; cursor: pointer; }
-    .adLoreName { flex: 0 0 auto; font-size: 13.5px; font-weight: 600; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .adLoreBadge { flex: 0 0 auto; font-size: 11px; border-radius: 999px; padding: 2px 8px; background: #a4707e; color: #fff; }
-    .adLoreBadge.adLoreKeyBadge { background: transparent; color: var(--adSub); border: 1px solid var(--adBorder); }
-    .adLorePrev { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--adSub); }
-    .adLoreEdit { padding: 0 14px 14px; }
-    .adLoreLock { border: 1px solid #a4707e88; border-radius: 10px; padding: 10px 12px; font-size: 12.5px; color: #a4707e; margin: 10px 0; }
+    .ghGhost { border: 1px solid transparent; background: none; color: var(--ghSub); border-radius: 999px; padding: 5px 11px; font-size: 12px; cursor: pointer; white-space: nowrap; margin-bottom: 5px; }
+    .ghGhost:hover { border-color: var(--ghBorder); color: inherit; }
+    .ghLoreBar { display: flex; gap: 8px; align-items: center; margin: 12px 0 10px; }
+    .ghLoreBar .ghLoreIn { flex: 1 1 auto; }
+    .ghLoreIn { border: 1px solid var(--ghBorder); background: var(--ghInput); color: inherit; border-radius: 8px; padding: 8px 10px; font-size: 13px; width: 100%; font-family: inherit; }
+    .ghLoreIn[disabled] { opacity: .5; }
+    .ghLoreLbl { display: block; font-size: 12px; color: var(--ghSub); margin: 10px 0 4px; }
+    .ghLoreArea { width: 100%; min-height: 190px; resize: vertical; border: 1px solid var(--ghBorder); border-radius: 8px; background: var(--ghInput); color: inherit; padding: 10px; font-size: 12.5px; line-height: 1.6; font-family: Consolas, 'D2Coding', monospace; }
+    .ghLoreRow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+    .ghLoreRow.ghLoreEnd { justify-content: flex-end; }
+    .ghLoreItem { border: 1px solid var(--ghBorder); background: var(--ghCard); border-radius: 12px; margin-bottom: 8px; }
+    .ghLoreItem.ghLoreOpen { border-color: #a4707e88; }
+    .ghLoreHead { display: flex; align-items: center; gap: 8px; padding: 11px 14px; cursor: pointer; }
+    .ghLoreName { flex: 0 0 auto; font-size: 13.5px; font-weight: 600; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ghLoreBadge { flex: 0 0 auto; font-size: 11px; border-radius: 999px; padding: 2px 8px; background: #a4707e; color: #fff; }
+    .ghLoreBadge.ghLoreKeyBadge { background: transparent; color: var(--ghSub); border: 1px solid var(--ghBorder); }
+    .ghLorePrev { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--ghSub); }
+    .ghLoreEdit { padding: 0 14px 14px; }
+    .ghLoreLock { border: 1px solid #a4707e88; border-radius: 10px; padding: 10px 12px; font-size: 12.5px; color: #a4707e; margin: 10px 0; }
 
     /* ---------- 미니 팝오버 ---------- */
-    body[data-theme="light"] .adMiniWrap, body[data-theme="light"] .adPill { --adBorder: #e2dcd2; --adBtnBg: #fffdf9; --adSub: #8a857c; --adCard: #fffdf9; --adCode: #f0ece4; --adInput: #ffffff; background: #faf7f2; color: #2b2a28; }
-    body[data-theme="dark"] .adMiniWrap, body[data-theme="dark"] .adPill { --adBorder: #3c3833; --adBtnBg: #2c2926; --adSub: #9a948a; --adCard: #2a2723; --adCode: #1d1b18; --adInput: #201d1a; background: #24211e; color: #e8e4de; }
+    body[data-theme="light"] .ghMiniWrap, body[data-theme="light"] .ghPill { --ghBorder: #e2dcd2; --ghBtnBg: #fffdf9; --ghSub: #8a857c; --ghCard: #fffdf9; --ghCode: #f0ece4; --ghInput: #ffffff; background: #faf7f2; color: #2b2a28; }
+    body[data-theme="dark"] .ghMiniWrap, body[data-theme="dark"] .ghPill { --ghBorder: #3c3833; --ghBtnBg: #2c2926; --ghSub: #9a948a; --ghCard: #2a2723; --ghCode: #1d1b18; --ghInput: #201d1a; background: #24211e; color: #e8e4de; }
 
-    .adPill { position: fixed; left: 0; bottom: 0; border-radius: 999px; border: 1px solid var(--adBorder); box-shadow: 0 6px 20px rgba(0,0,0,.28); display: flex; align-items: center; gap: 2px; padding: 0 10px 0 4px; font-size: 13px; font-weight: 600; user-select: none; overflow: hidden; }
-    .adPill:hover { border-color: #a4707e; }
-    .adPillLabel { flex: 1 1 auto; text-align: center; cursor: pointer; white-space: nowrap; }
+    .ghPill { position: fixed; left: 0; bottom: 0; border-radius: 999px; border: 1px solid var(--ghBorder); box-shadow: 0 6px 20px rgba(0,0,0,.28); display: flex; align-items: center; gap: 2px; padding: 0 10px 0 4px; font-size: 13px; font-weight: 600; user-select: none; overflow: hidden; }
+    .ghPill:hover { border-color: #a4707e; }
+    .ghPillLabel { flex: 1 1 auto; text-align: center; cursor: pointer; white-space: nowrap; }
     /* 드래그는 이 손잡이에서만 시작한다 — 본체를 잡고 끌면 클릭과 뒤엉킨다(기획자님 08-26) */
-    .adGrip { flex: 0 0 auto; width: 26px; align-self: stretch; display: inline-flex; align-items: center; justify-content: center; color: var(--adSub); font-size: 14px; cursor: grab; user-select: none; touch-action: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
-    .adGrip:hover { color: #a4707e; }
-    .adGrip:active { cursor: grabbing; }
+    .ghGrip { flex: 0 0 auto; width: 26px; align-self: stretch; display: inline-flex; align-items: center; justify-content: center; color: var(--ghSub); font-size: 14px; cursor: grab; user-select: none; touch-action: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+    .ghGrip:hover { color: #a4707e; }
+    .ghGrip:active { cursor: grabbing; }
 
     /* ★크기를 iframe에 기대지 않는다. width:100%/inset:0으로 두면 iframe이 잠깐이라도
        전체화면인 순간에 알약이 화면만 한 원이 되고 팝오버가 화면을 덮는다(실기 08-26).
        폭과 최대높이는 마크업의 인라인 값으로 주고, 여기서는 바닥에 붙이기만 한다.
        바닥 기준이라 iframe 높이를 줄여도 화면상 위치·크기가 그대로다(측정→축소 점프 제거).
-       내용이 최대높이를 넘으면 본문(.adMBody)만 스크롤한다. */
-    .adMiniWrap { position: fixed; left: 0; bottom: 0; border-radius: 16px; border: 1px solid var(--adBorder); box-shadow: 0 14px 44px rgba(0,0,0,.34); display: flex; flex-direction: column; overflow: hidden; }
-    .adMiniWrap.adDragging { transition: none; }
+       내용이 최대높이를 넘으면 본문(.ghMBody)만 스크롤한다. */
+    .ghMiniWrap { position: fixed; left: 0; bottom: 0; border-radius: 16px; border: 1px solid var(--ghBorder); box-shadow: 0 14px 44px rgba(0,0,0,.34); display: flex; flex-direction: column; overflow: hidden; }
+    .ghMiniWrap.ghDragging { transition: none; }
     /* 탭을 바꿀 때는 위를 고정한다 — 메뉴바가 움직이면 방금 누른 자리가 달아난다 */
-    .adMiniWrap.adAnchorTop { top: 0; bottom: auto; }
+    .ghMiniWrap.ghAnchorTop { top: 0; bottom: auto; }
 
-    .adMMenu { display: flex; align-items: center; gap: 4px; padding: 8px 8px 7px; flex: 0 0 auto; border-bottom: 1px solid var(--adBorder); user-select: none; }
-    .adMSpace { flex: 1 1 0; min-width: 2px; }
+    .ghMMenu { display: flex; align-items: center; gap: 4px; padding: 8px 8px 7px; flex: 0 0 auto; border-bottom: 1px solid var(--ghBorder); user-select: none; }
+    .ghMSpace { flex: 1 1 0; min-width: 2px; }
     /* 메뉴 항목은 절대 눌리지 않는다 — flex 기본 shrink가 아이콘 버튼을 찌그러뜨린 실측 있음 */
-    .adMTab { flex: 0 0 auto; border: 1px solid var(--adBorder); background: var(--adBtnBg); color: inherit; border-radius: 999px; padding: 5px 10px; font-size: 12px; cursor: pointer; white-space: nowrap; }
-    .adMTab.adActive { background: #a4707e; border-color: #a4707e; color: #fff; }
-    .adMBtn { flex: 0 0 auto; border: 1px solid var(--adBorder); background: var(--adBtnBg); color: inherit; border-radius: 999px; padding: 5px 9px; font-size: 12px; cursor: pointer; white-space: nowrap; }
-    .adMMenu .adMBtn.adMIcon { flex: 0 0 26px; width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
-    .adMBtn.adMIcon { width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+    .ghMTab { flex: 0 0 auto; border: 1px solid var(--ghBorder); background: var(--ghBtnBg); color: inherit; border-radius: 999px; padding: 5px 10px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+    .ghMTab.ghActive { background: #a4707e; border-color: #a4707e; color: #fff; }
+    .ghMBtn { flex: 0 0 auto; border: 1px solid var(--ghBorder); background: var(--ghBtnBg); color: inherit; border-radius: 999px; padding: 5px 9px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+    .ghMMenu .ghMBtn.ghMIcon { flex: 0 0 26px; width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+    .ghMBtn.ghMIcon { width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
 
     /* 본문만 스크롤한다 — 상단 메뉴와 하단 큐 노티는 항상 제자리 (기획자님 확정) */
-    .adMBody { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 11px 12px; display: flex; flex-direction: column; gap: 9px; font-size: 13px; line-height: 1.6; }
-    .adMHint { flex: 0 0 auto; font-size: 12px; color: var(--adSub); line-height: 1.55; }
-    .adMCard { flex: 0 0 auto; border: 1px solid var(--adBorder); background: var(--adCard); border-radius: 11px; padding: 10px 12px; font-size: 12.5px; line-height: 1.65; user-select: text; -webkit-user-select: text; }
-    .adMCard b { color: #a4707e; }
-    .adMArea { flex: 0 0 auto; width: 100%; height: 84px; resize: vertical; border: 1px solid var(--adBorder); border-radius: 9px; background: var(--adInput); color: inherit; padding: 9px 10px; font-size: 12.5px; line-height: 1.6; font-family: inherit; }
-    .adMRow { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-    .adMRow.adMEnd { justify-content: flex-end; }
-    .adMLabel { font-size: 11.5px; color: var(--adSub); white-space: nowrap; }
-    .adMChk { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--adSub); white-space: nowrap; cursor: pointer; }
-    .adMChk input { margin: 0; }
+    .ghMBody { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 11px 12px; display: flex; flex-direction: column; gap: 9px; font-size: 13px; line-height: 1.6; }
+    .ghMHint { flex: 0 0 auto; font-size: 12px; color: var(--ghSub); line-height: 1.55; }
+    .ghMCard { flex: 0 0 auto; border: 1px solid var(--ghBorder); background: var(--ghCard); border-radius: 11px; padding: 10px 12px; font-size: 12.5px; line-height: 1.65; user-select: text; -webkit-user-select: text; }
+    .ghMCard b { color: #a4707e; }
+    .ghMArea { flex: 0 0 auto; width: 100%; height: 84px; resize: vertical; border: 1px solid var(--ghBorder); border-radius: 9px; background: var(--ghInput); color: inherit; padding: 9px 10px; font-size: 12.5px; line-height: 1.6; font-family: inherit; }
+    .ghMRow { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .ghMRow.ghMEnd { justify-content: flex-end; }
+    .ghMLabel { font-size: 11.5px; color: var(--ghSub); white-space: nowrap; }
+    .ghMChk { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--ghSub); white-space: nowrap; cursor: pointer; }
+    .ghMChk input { margin: 0; }
     /* 스피너를 지워야 반 폭에서도 숫자가 보인다 */
-    .adMNum { width: 34px; border: 1px solid var(--adBorder); background: var(--adInput); color: inherit; border-radius: 7px; padding: 4px 5px; font-size: 12.5px; text-align: center; appearance: textfield; -moz-appearance: textfield; }
-    .adMNum::-webkit-outer-spin-button, .adMNum::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-    .adMGo { border: 1px solid #a4707e; background: #a4707e; color: #fff; border-radius: 7px; padding: 4px 11px; font-size: 12px; cursor: pointer; white-space: nowrap; }
-    .adMGo[disabled] { opacity: .55; cursor: default; }
-    .adMErr { flex: 0 0 auto; font-size: 12px; color: #c0564e; }
+    .ghMNum { width: 34px; border: 1px solid var(--ghBorder); background: var(--ghInput); color: inherit; border-radius: 7px; padding: 4px 5px; font-size: 12.5px; text-align: center; appearance: textfield; -moz-appearance: textfield; }
+    .ghMNum::-webkit-outer-spin-button, .ghMNum::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .ghMGo { border: 1px solid #a4707e; background: #a4707e; color: #fff; border-radius: 7px; padding: 4px 11px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+    .ghMGo[disabled] { opacity: .55; cursor: default; }
+    .ghMErr { flex: 0 0 auto; font-size: 12px; color: #c0564e; }
     /* 좁은 폭에서 액션 6개(문장 수·역사칭·전송·복사·만들어줘)를 한 줄에 유지 — 320px 실측 기준 */
-    .adNarrow .adMRow { gap: 5px; }
-    .adNarrow .adCopyBtn { padding: 4px 8px; }
-    .adNarrow .adMGo { padding: 4px 9px; }
+    .ghNarrow .ghMRow { gap: 5px; }
+    .ghNarrow .ghCopyBtn { padding: 4px 8px; }
+    .ghNarrow .ghMGo { padding: 4px 9px; }
 
-    .adMNoti { flex: 0 0 auto; border-top: 1px solid var(--adBorder); background: var(--adCard); }
-    .adMNotiHead { display: flex; align-items: center; gap: 8px; padding: 8px 11px; cursor: pointer; font-size: 12px; }
-    .adMNotiNum { flex: 0 0 auto; min-width: 21px; height: 21px; border-radius: 999px; background: #6f8fb5; color: #fff; font-size: 11px; display: inline-flex; align-items: center; justify-content: center; }
-    .adMNotiTitle { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--adSub); }
-    .adMNotiBody { padding: 0 11px 11px; font-size: 12.5px; line-height: 1.65; max-height: 168px; overflow-y: auto; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
+    .ghMNoti { flex: 0 0 auto; border-top: 1px solid var(--ghBorder); background: var(--ghCard); }
+    .ghMNotiHead { display: flex; align-items: center; gap: 8px; padding: 8px 11px; cursor: pointer; font-size: 12px; }
+    .ghMNotiNum { flex: 0 0 auto; min-width: 21px; height: 21px; border-radius: 999px; background: #6f8fb5; color: #fff; font-size: 11px; display: inline-flex; align-items: center; justify-content: center; }
+    .ghMNotiTitle { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ghSub); }
+    .ghMNotiBody { padding: 0 11px 11px; font-size: 12.5px; line-height: 1.65; max-height: 168px; overflow-y: auto; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
     `;
   }
 
@@ -2549,21 +2573,21 @@
   // ==========================================================================
 
   function miniMenuHtml() {
-    const tab = (id, label) => '<button class="adMTab' + (state.miniTab === id ? ' adActive' : '')
+    const tab = (id, label) => '<button class="ghMTab' + (state.miniTab === id ? ' ghActive' : '')
       + '" data-action="mini-tab" data-tab="' + id + '">' + label + '</button>';
-    let out = '<div class="adMMenu">';
-    out += '<span class="adGrip" data-drag="1" title="여기를 잡고 옮기세요">≡</span>';
+    let out = '<div class="ghMMenu">';
+    out += '<span class="ghGrip" data-drag="1" title="여기를 잡고 옮기세요">≡</span>';
     out += tab('advice', 'AD 의견');
     out += tab('input', '인풋 도우미');
     if (state.miniNarrow) {
-      out += '<button class="adMBtn" data-action="mini-goto" data-screen="chat">열기</button>';
+      out += '<button class="ghMBtn" data-action="mini-goto" data-screen="chat">열기</button>';
     } else {
-      out += '<button class="adMBtn" data-action="mini-goto" data-screen="chat">편집회의</button>';
-      out += '<button class="adMBtn" data-action="mini-goto" data-screen="cue">큐시트</button>';
+      out += '<button class="ghMBtn" data-action="mini-goto" data-screen="chat">편집회의</button>';
+      out += '<button class="ghMBtn" data-action="mini-goto" data-screen="cue">큐시트</button>';
     }
-    out += '<span class="adMSpace"></span>';
-    out += '<button class="adMBtn adMIcon" data-action="mini-goto" data-screen="settings" title="설정">⚙</button>';
-    out += '<button class="adMBtn adMIcon" data-action="mini-min" title="최소화">—</button>';
+    out += '<span class="ghMSpace"></span>';
+    out += '<button class="ghMBtn ghMIcon" data-action="mini-goto" data-screen="settings" title="설정">⚙</button>';
+    out += '<button class="ghMBtn ghMIcon" data-action="mini-min" title="최소화">—</button>';
     out += '</div>';
     return out;
   }
@@ -2579,101 +2603,101 @@
     if (!cue) return '';
     const open = state.cueNotiOpen;
     const preview = (cue.text || '').replace(/\s+/g, ' ').trim().slice(0, 40);
-    let out = '<div class="adMNoti">';
-    out += '<div class="adMNotiHead" data-action="mini-noti">'
-      + '<span class="adMNotiNum">' + (idx + 1) + '</span>'
-      + '<span class="adMNotiTitle">' + (open ? '다음 차례 큐' : esc(preview || '(빈 큐)')) + '</span>'
-      + '<button class="adMBtn" data-action="mini-cue-copy" data-idx="' + idx + '">복사</button>'
-      + '<span class="adMLabel">' + (open ? '▾' : '▸') + '</span>'
+    let out = '<div class="ghMNoti">';
+    out += '<div class="ghMNotiHead" data-action="mini-noti">'
+      + '<span class="ghMNotiNum">' + (idx + 1) + '</span>'
+      + '<span class="ghMNotiTitle">' + (open ? '다음 차례 큐' : esc(preview || '(빈 큐)')) + '</span>'
+      + '<button class="ghMBtn" data-action="mini-cue-copy" data-idx="' + idx + '">복사</button>'
+      + '<span class="ghMLabel">' + (open ? '▾' : '▸') + '</span>'
       + '</div>';
-    if (open) out += '<div class="adMNotiBody">' + esc(cue.text || '') + '</div>';
+    if (open) out += '<div class="ghMNotiBody">' + esc(cue.text || '') + '</div>';
     out += '</div>';
     return out;
   }
 
   function miniAdviceHtml() {
-    if (state.adviceBusy) return '<div class="adMHint">AD가 보고 있어요…</div>';
+    if (state.adviceBusy) return '<div class="ghMHint">AD가 보고 있어요…</div>';
     let out = '';
-    if (state.adviceErr) out += '<div class="adMErr">' + esc(state.adviceErr) + '</div>';
+    if (state.adviceErr) out += '<div class="ghMErr">' + esc(state.adviceErr) + '</div>';
     if (state.advice && state.advice.text) {
-      out += '<div class="adMCard">' + renderRich(state.advice.text) + '</div>';
-      out += '<div class="adMRow adMEnd"><button class="adCopyBtn" data-action="mini-advice">다시 물어보기</button></div>';
+      out += '<div class="ghMCard">' + renderRich(state.advice.text) + '</div>';
+      out += '<div class="ghMRow ghMEnd"><button class="ghCopyBtn" data-action="mini-advice">다시 물어보기</button></div>';
     } else {
-      out += '<div class="adMHint">'
+      out += '<div class="ghMHint">'
         + (state.settings.adviceAuto
           ? 'AD가 출력이 끝날 때마다 의견을 냅니다. 아직 이번 턴 의견이 없어요.'
           : 'AD 의견 자동 호출이 꺼져 있어요. 필요할 때 눌러 주세요.')
         + '</div>';
-      out += '<div class="adMRow adMEnd"><button class="adMGo" data-action="mini-advice">지금 물어보기</button></div>';
+      out += '<div class="ghMRow ghMEnd"><button class="ghMGo" data-action="mini-advice">지금 물어보기</button></div>';
     }
     return out;
   }
 
   function miniInputHtml() {
-    let out = '<div class="adMHint">AD가 감독님의 인풋을 더 풍성하게 만들어 드려요.</div>';
-    out += '<textarea class="adMArea" id="adMInput" placeholder="쓰고 싶은 내용을 적어 주세요. 짧아도 괜찮아요.">'
+    let out = '<div class="ghMHint">AD가 감독님의 인풋을 더 풍성하게 만들어 드려요.</div>';
+    out += '<textarea class="ghMArea" id="ghMInput" placeholder="쓰고 싶은 내용을 적어 주세요. 짧아도 괜찮아요.">'
       + esc(state.inputDraft || '') + '</textarea>';
-    if (state.inputErr) out += '<div class="adMErr">' + esc(state.inputErr) + '</div>';
-    if (state.inputBusy) out += '<div class="adMHint">AD가 다듬고 있어요…</div>';
-    else if (state.inputResult) out += '<div class="adMCard">' + esc(state.inputResult) + '</div>';
+    if (state.inputErr) out += '<div class="ghMErr">' + esc(state.inputErr) + '</div>';
+    if (state.inputBusy) out += '<div class="ghMHint">AD가 다듬고 있어요…</div>';
+    else if (state.inputResult) out += '<div class="ghMCard">' + esc(state.inputResult) + '</div>';
 
-    // 옵션과 실행을 한 줄로. 전송·복사는 회의 답변의 코드블록 버튼과 같은 형식(.adCopyBtn · 전송 먼저)
+    // 옵션과 실행을 한 줄로. 전송·복사는 회의 답변의 코드블록 버튼과 같은 형식(.ghCopyBtn · 전송 먼저)
     const hasResult = !state.inputBusy && !!state.inputResult;
-    out += '<div class="adMRow">'
-      + '<span class="adMLabel" title="문장 수">' + (state.miniNarrow ? '문장' : '문장 수') + '</span>'
-      + '<input class="adMNum" type="number" min="1" max="12" step="1" id="adMSent" title="문장 수" value="'
+    out += '<div class="ghMRow">'
+      + '<span class="ghMLabel" title="문장 수">' + (state.miniNarrow ? '문장' : '문장 수') + '</span>'
+      + '<input class="ghMNum" type="number" min="1" max="12" step="1" id="ghMSent" title="문장 수" value="'
       + (state.settings.inputSent || 3) + '" data-action="mini-sent">'
-      + '<label class="adMChk" title="역사칭 허용"><input type="checkbox" data-action="mini-npc"'
+      + '<label class="ghMChk" title="역사칭 허용"><input type="checkbox" data-action="mini-npc"'
       + (state.settings.inputNpc ? ' checked' : '') + '>' + (state.miniNarrow ? '역사칭' : '역사칭 허용') + '</label>'
-      + '<span class="adMSpace"></span>'
-      + (hasResult && !state.sendBlocked ? '<button class="adCopyBtn" data-action="mini-input-send">전송</button>' : '')
-      + (hasResult ? '<button class="adCopyBtn" data-action="mini-input-copy">복사</button>' : '')
-      + '<button class="adMGo" data-action="mini-input-go"' + (state.inputBusy ? ' disabled' : '') + '>만들어줘</button>'
+      + '<span class="ghMSpace"></span>'
+      + (hasResult && !state.sendBlocked ? '<button class="ghCopyBtn" data-action="mini-input-send">전송</button>' : '')
+      + (hasResult ? '<button class="ghCopyBtn" data-action="mini-input-copy">복사</button>' : '')
+      + '<button class="ghMGo" data-action="mini-input-go"' + (state.inputBusy ? ' disabled' : '') + '>만들어줘</button>'
       + '</div>';
     return out;
   }
 
   function miniHtml() {
     const body = state.miniTab === 'input' ? miniInputHtml() : miniAdviceHtml();
-    return '<div class="adMiniWrap adDragTarget' + (state.miniNarrow ? ' adNarrow' : '') + (state.drag ? ' adDragging' : '')
-      + (state.miniAnchor === 'top' ? ' adAnchorTop' : '')
-      + '" id="adMiniWrap" style="width:' + (state.miniW || MINI_W) + 'px;max-height:' + (state.miniMaxH || MINI_H) + 'px;">'
+    return '<div class="ghMiniWrap ghDragTarget' + (state.miniNarrow ? ' ghNarrow' : '') + (state.drag ? ' ghDragging' : '')
+      + (state.miniAnchor === 'top' ? ' ghAnchorTop' : '')
+      + '" id="ghMiniWrap" style="width:' + (state.miniW || MINI_W) + 'px;max-height:' + (state.miniMaxH || MINI_H) + 'px;">'
       + miniMenuHtml()
-      + '<div class="adMBody">' + body + '</div>'
+      + '<div class="ghMBody">' + body + '</div>'
       + miniNotiHtml()
       + '</div>';
   }
 
   function pillHtml() {
-    return '<div class="adPill adDragTarget" style="width:' + PILL_W + 'px;height:' + PILL_H + 'px;">'
-      + '<span class="adGrip" data-drag="1" title="여기를 잡고 옮기세요">≡</span>'
-      + '<span class="adPillLabel" data-action="mini-open">🎬 AD 부르기</span>'
+    return '<div class="ghPill ghDragTarget" style="width:' + PILL_W + 'px;height:' + PILL_H + 'px;">'
+      + '<span class="ghGrip" data-drag="1" title="여기를 잡고 옮기세요">≡</span>'
+      + '<span class="ghPillLabel" data-action="mini-open">🎬 AD 부르기</span>'
       + '</div>';
   }
 
   function headerHtml() {
     const dark = state.settings.theme === 'dark';
     const inSettings = state.screen === 'settings';
-    const room = '<span class="adRoomLabel">📍 ' + esc(state.env ? state.env.roomLabel : '카드/채팅 미선택')
+    const room = '<span class="ghRoomLabel">📍 ' + esc(state.env ? state.env.roomLabel : '카드/채팅 미선택')
       + (state.env && state.env.isAdCard ? ' · 감독님 바로 옆♥️' : '') + '</span>';
-    return '<div class="adHeader">'
-      + '<div class="adTitle">AD야 잠깐 와봐</div>'
+    return '<div class="ghHeader">'
+      + '<div class="ghTitle">AD야 잠깐 와봐</div>'
       + room
-      + '<span class="adHSpace"></span>'
-      + '<button class="adHBtn' + (inSettings ? ' adAccent' : '') + '" data-action="go-settings">⚙ 설정</button>'
-      + '<button class="adHBtn adIcon" data-action="toggle-theme" title="테마">' + (dark ? '☀' : '☾') + '</button>'
-      + '<button class="adHBtn adIcon" data-action="close" title="닫기">✕</button>'
+      + '<span class="ghHSpace"></span>'
+      + '<button class="ghHBtn' + (inSettings ? ' ghAccent' : '') + '" data-action="go-settings">⚙ 설정</button>'
+      + '<button class="ghHBtn ghIcon" data-action="toggle-theme" title="테마">' + (dark ? '☀' : '☾') + '</button>'
+      + '<button class="ghHBtn ghIcon" data-action="close" title="닫기">✕</button>'
       + '</div>';
   }
 
   function tabsHtml() {
     const meetingActive = state.screen === 'list' || state.screen === 'chat';
     const arcActive = state.screen === 'arc';
-    return '<div class="adTabs">'
-      + '<button class="adTab' + (meetingActive ? ' adActive' : '') + '" data-action="tab-meeting">편집회의</button>'
-      + '<button class="adTab' + (state.screen === 'lore' ? ' adActive' : '') + '" data-action="tab-lore">로어북</button>'
-      + '<button class="adTab' + (state.screen === 'cue' ? ' adActive' : '') + '" data-action="tab-cue">큐시트' + (state.cues && state.cues.length ? ' ' + state.cues.length : '') + '</button>'
-      + '<button class="adTab' + (arcActive ? ' adActive' : '') + '" data-action="tab-arc">스토리 아크' + (state.arc && state.arc.trim() ? '' : ' ●') + '</button>'
+    return '<div class="ghTabs">'
+      + '<button class="ghTab' + (meetingActive ? ' ghActive' : '') + '" data-action="tab-meeting">편집회의</button>'
+      + '<button class="ghTab' + (state.screen === 'lore' ? ' ghActive' : '') + '" data-action="tab-lore">로어북</button>'
+      + '<button class="ghTab' + (state.screen === 'cue' ? ' ghActive' : '') + '" data-action="tab-cue">큐시트' + (state.cues && state.cues.length ? ' ' + state.cues.length : '') + '</button>'
+      + '<button class="ghTab' + (arcActive ? ' ghActive' : '') + '" data-action="tab-arc">스토리 아크' + (state.arc && state.arc.trim() ? '' : ' ●') + '</button>'
       + '</div>';
   }
 
@@ -2684,103 +2708,103 @@
     else if (state.arcMode === 'edit') statusText = '편집 중 — 저장해야 반영됩니다';
     else if (state.arcMode === 'adapt') statusText = '각색 중';
     else statusText = has ? '작성됨 — 이 채팅의 모든 답변에서 참조합니다' : '비어 있음';
-    const status = '<div class="adArcStatus">이 채팅 전용 · ' + statusText + '</div>';
+    const status = '<div class="ghArcStatus">이 채팅 전용 · ' + statusText + '</div>';
 
     let body;
     if (state.arcBusy) {
-      body = '<div class="adPending">AD가 아크를 쓰는 중…</div>';
+      body = '<div class="ghPending">AD가 아크를 쓰는 중…</div>';
     } else if (state.arcMode === 'edit') {
-      body = '<textarea id="adArcInput" class="adArcBig" placeholder="스토리 아크를 직접 입력하세요.">' + esc(state.arcDraft) + '</textarea>'
-        + '<div class="adRow"><button class="adHBtn" data-action="arc-cancel">취소</button>'
-        + '<button class="adHBtn adAccent" data-action="arc-save">저장</button></div>';
+      body = '<textarea id="ghArcInput" class="ghArcBig" placeholder="스토리 아크를 직접 입력하세요.">' + esc(state.arcDraft) + '</textarea>'
+        + '<div class="ghRow"><button class="ghHBtn" data-action="arc-cancel">취소</button>'
+        + '<button class="ghHBtn ghAccent" data-action="arc-save">저장</button></div>';
     } else if (state.arcMode === 'adapt') {
-      body = '<div class="adArcView adArcGrow">' + mdToHtml(state.arc) + '</div>'
-        + '<div class="adAdaptBar">'
-        + '<button class="adHBtn" data-action="arc-cancel">취소</button>'
-        + '<textarea id="adArcAdaptInput" placeholder="(선택) 반영할 방향이 있으면 적어주세요. 비워두면 방향은 유지한 채 내용만 보완합니다.">' + esc(state.arcAdaptNote) + '</textarea>'
-        + '<button class="adSend" data-action="arc-adapt-run">각색 실행</button>'
+      body = '<div class="ghArcView ghArcGrow">' + mdToHtml(state.arc) + '</div>'
+        + '<div class="ghAdaptBar">'
+        + '<button class="ghHBtn" data-action="arc-cancel">취소</button>'
+        + '<textarea id="ghArcAdaptInput" placeholder="(선택) 반영할 방향이 있으면 적어주세요. 비워두면 방향은 유지한 채 내용만 보완합니다.">' + esc(state.arcAdaptNote) + '</textarea>'
+        + '<button class="ghSend" data-action="arc-adapt-run">각색 실행</button>'
         + '</div>';
     } else if (has) {
       const del = state.arcDeleteAsk
-        ? '<button class="adHBtn adDanger" data-action="arc-delete-confirm">삭제 확정</button><button class="adHBtn" data-action="arc-delete-cancel">취소</button>'
-        : '<button class="adHBtn adDanger" data-action="arc-delete">삭제</button>';
-      body = '<div class="adArcView adArcGrow">' + mdToHtml(state.arc) + '</div>'
-        + '<div class="adRow"><button class="adHBtn" data-action="export-arc-md">md 저장</button>' + del
-        + '<button class="adHBtn" data-action="arc-adapt">각색</button>'
-        + '<button class="adHBtn adAccent" data-action="arc-edit">편집</button></div>';
+        ? '<button class="ghHBtn ghDanger" data-action="arc-delete-confirm">삭제 확정</button><button class="ghHBtn" data-action="arc-delete-cancel">취소</button>'
+        : '<button class="ghHBtn ghDanger" data-action="arc-delete">삭제</button>';
+      body = '<div class="ghArcView ghArcGrow">' + mdToHtml(state.arc) + '</div>'
+        + '<div class="ghRow"><button class="ghHBtn" data-action="export-arc-md">md 저장</button>' + del
+        + '<button class="ghHBtn" data-action="arc-adapt">각색</button>'
+        + '<button class="ghHBtn ghAccent" data-action="arc-edit">편집</button></div>';
     } else {
-      body = '<textarea id="adArcSeed" class="adArcBig" placeholder="원하는 이야기 줄기를 적어주세요. AD가 이 카드 설정을 바탕으로 스토리 아크를 작성합니다.">' + esc(state.arcSeed) + '</textarea>'
-        + '<div class="adRow"><button class="adHBtn" data-action="arc-direct">직접 입력</button>'
-        + '<button class="adHBtn adAccent" data-action="arc-generate">AD에게 작성 요청</button></div>';
+      body = '<textarea id="ghArcSeed" class="ghArcBig" placeholder="원하는 이야기 줄기를 적어주세요. AD가 이 카드 설정을 바탕으로 스토리 아크를 작성합니다.">' + esc(state.arcSeed) + '</textarea>'
+        + '<div class="ghRow"><button class="ghHBtn" data-action="arc-direct">직접 입력</button>'
+        + '<button class="ghHBtn ghAccent" data-action="arc-generate">AD에게 작성 요청</button></div>';
     }
-    return '<div class="adArcTab">' + status + body + '</div>';
+    return '<div class="ghArcTab">' + status + body + '</div>';
   }
 
   function cueOptsHtml() {
     const o = state.cueOpts || CUE_OPT_DEFAULTS;
-    const sw = (id, on) => '<label class="adSwitch"><input type="checkbox" id="' + id + '"' + (on ? ' checked' : '') + '><span class="adSlider"></span></label>';
-    return '<div class="adCueOpts">'
-      + '<div class="adCueOptRow"><span class="adCueOptLabel">발화 규모</span>'
-      + '<span class="adCueOptCtl"><input type="number" id="adCueOptSent" min="1" max="12" value="' + (o.sent | 0) + '"> 문장 내외</span>'
-      + '<span class="adCueOptGuide">입력발화 당 문장 개수(근사치) — 범위가 아니라 그 정도 내외로 쓰게 해요</span></div>'
-      + '<div class="adCueOptRow"><span class="adCueOptLabel">대사 포함</span>'
-      + '<span class="adCueOptCtl">' + sw('adCueOptDlg', o.dialogue) + '</span>'
-      + '<span class="adCueOptGuide">입력발화에 대사를 포함해요</span></div>'
-      + '<div class="adCueOptRow"><span class="adCueOptLabel">역사칭 허용</span>'
-      + '<span class="adCueOptCtl">' + sw('adCueOptNpc', o.npc) + '</span>'
-      + '<span class="adCueOptGuide">{{user}} 외 NPC의 행동·생각·대사까지 입력발화에 포함해요</span></div>'
-      + '<div class="adCueOptFoot">변경 즉시 저장 · 생성·이어서 생성·각색 전부에 적용 — 시드·각색 방향과 어긋나면 그쪽(직접 적으신 지시)이 우선이에요</div>'
+    const sw = (id, on) => '<label class="ghSwitch"><input type="checkbox" id="' + id + '"' + (on ? ' checked' : '') + '><span class="ghSlider"></span></label>';
+    return '<div class="ghCueOpts">'
+      + '<div class="ghCueOptRow"><span class="ghCueOptLabel">발화 규모</span>'
+      + '<span class="ghCueOptCtl"><input type="number" id="ghCueOptSent" min="1" max="12" value="' + (o.sent | 0) + '"> 문장 내외</span>'
+      + '<span class="ghCueOptGuide">입력발화 당 문장 개수(근사치) — 범위가 아니라 그 정도 내외로 쓰게 해요</span></div>'
+      + '<div class="ghCueOptRow"><span class="ghCueOptLabel">대사 포함</span>'
+      + '<span class="ghCueOptCtl">' + sw('ghCueOptDlg', o.dialogue) + '</span>'
+      + '<span class="ghCueOptGuide">입력발화에 대사를 포함해요</span></div>'
+      + '<div class="ghCueOptRow"><span class="ghCueOptLabel">역사칭 허용</span>'
+      + '<span class="ghCueOptCtl">' + sw('ghCueOptNpc', o.npc) + '</span>'
+      + '<span class="ghCueOptGuide">{{user}} 외 NPC의 행동·생각·대사까지 입력발화에 포함해요</span></div>'
+      + '<div class="ghCueOptFoot">변경 즉시 저장 · 생성·이어서 생성·각색 전부에 적용 — 시드·각색 방향과 어긋나면 그쪽(직접 적으신 지시)이 우선이에요</div>'
       + '</div>';
   }
 
   function cueTabHtml() {
     const items = state.cues || [];
-    const status = '<div class="adArcStatus">이 채팅 전용 · '
+    const status = '<div class="ghArcStatus">이 채팅 전용 · '
       + (items.length ? items.length + '개 큐 — 예약이지 의무가 아니에요 · 편집회의 답변에서 참고해요' : '비어 있음')
       + '</div>';
     let body;
     if (state.cueBusy) {
-      body = '<div class="adPending">AD가 큐시트를 쓰는 중…</div>';
+      body = '<div class="ghPending">AD가 큐시트를 쓰는 중…</div>';
     } else if (!items.length) {
       const seedPh = (state.arc && state.arc.trim())
         ? '이 채팅에 스토리 아크가 있어요 — AD가 아크를 기준점 삼아 현재 로그와 함께 큐를 작성해요. 원하는 전개·속도감·분량을 적어주세요. 예: 고백까지 15턴, 큐 8개.'
         : '원하는 전개·속도감·분량을 적어주세요. 예: 고백까지 15턴, 큐 8개. AD가 현재 로그를 바탕으로 입력발화 큐를 작성해요. 스토리 아크를 먼저 만들어두면 그걸 기준점으로 삼아요.';
       body = cueOptsHtml()
-        + '<textarea id="adCueSeed" class="adArcBig" placeholder="' + seedPh + '">' + esc(state.cueSeed) + '</textarea>'
-        + '<div class="adRow"><button class="adHBtn" data-action="cue-add">+ 직접 추가</button>'
-        + '<button class="adHBtn adAccent" data-action="cue-generate">AD에게 작성 요청</button></div>';
+        + '<textarea id="ghCueSeed" class="ghArcBig" placeholder="' + seedPh + '">' + esc(state.cueSeed) + '</textarea>'
+        + '<div class="ghRow"><button class="ghHBtn" data-action="cue-add">+ 직접 추가</button>'
+        + '<button class="ghHBtn ghAccent" data-action="cue-generate">AD에게 작성 요청</button></div>';
     } else {
       const nextIdx = items.findIndex((c) => !(c.done || c.sentAt)); // 첫 미체크 큐 = 다음 차례
-      body = cueOptsHtml() + '<div class="adCueList">' + items.map((c, i) => {
+      body = cueOptsHtml() + '<div class="ghCueList">' + items.map((c, i) => {
         const open = state.cueOpenId === c.id;
         const done = !!(c.done || c.sentAt);
-        let inner = '<div class="adCueHead" data-action="cue-toggle" data-id="' + c.id + '">'
-          + '<input type="checkbox" class="adCueDone" data-action="cue-done" data-id="' + c.id + '"' + (done ? ' checked' : '') + ' title="입력 완료 체크 — 전송 버튼 사용 시 자동 체크">'
-          + '<span class="adCueNum' + (i === nextIdx ? ' adCueNext" title="다음 차례' : '') + '">' + (i + 1) + '</span>'
-          + '<span class="adCuePreview' + (done ? ' adCueDim' : '') + '">' + (open ? '<span class="adDim">(편집 중)</span>' : esc((c.text || '(비어 있음)').slice(0, 64)) + ((c.text || '').length > 64 ? '…' : '')) + '</span>'
-          + '<span class="adCueMove"><button class="adAct" data-action="cue-up" data-id="' + c.id + '">▲</button>'
-          + '<button class="adAct" data-action="cue-down" data-id="' + c.id + '">▼</button></span>'
+        let inner = '<div class="ghCueHead" data-action="cue-toggle" data-id="' + c.id + '">'
+          + '<input type="checkbox" class="ghCueDone" data-action="cue-done" data-id="' + c.id + '"' + (done ? ' checked' : '') + ' title="입력 완료 체크 — 전송 버튼 사용 시 자동 체크">'
+          + '<span class="ghCueNum' + (i === nextIdx ? ' ghCueNext" title="다음 차례' : '') + '">' + (i + 1) + '</span>'
+          + '<span class="ghCuePreview' + (done ? ' ghCueDim' : '') + '">' + (open ? '<span class="ghDim">(편집 중)</span>' : esc((c.text || '(비어 있음)').slice(0, 64)) + ((c.text || '').length > 64 ? '…' : '')) + '</span>'
+          + '<span class="ghCueMove"><button class="ghAct" data-action="cue-up" data-id="' + c.id + '">▲</button>'
+          + '<button class="ghAct" data-action="cue-down" data-id="' + c.id + '">▼</button></span>'
           + '</div>';
         if (open) {
           const del = state.cueDeleteAsk === c.id
-            ? '<button class="adHBtn adDanger" data-action="cue-delete-confirm" data-id="' + c.id + '">삭제 확정</button><button class="adHBtn" data-action="cue-delete-cancel">취소</button>'
-            : '<button class="adHBtn adDanger" data-action="cue-delete" data-id="' + c.id + '">삭제</button>';
-          inner += '<div class="adCueBody">'
-            + '<textarea id="adCueText" class="adCueEdit">' + esc(state.cueDraft != null ? state.cueDraft : (c.text || '')) + '</textarea>'
-            + '<input id="adCueNote" class="adCueNote" placeholder="(선택) 각색 방향 — 비워두면 현재 로그에 맞게만 손봐요" value="' + esc(state.cueNote) + '">'
-            + '<div class="adRow">' + del
-            + '<button class="adHBtn" data-action="cue-adapt" data-id="' + c.id + '">각색</button>'
-            + '<button class="adHBtn" data-action="cue-copy" data-id="' + c.id + '">복사</button>'
-            + (state.sendBlocked ? '' : '<button class="adHBtn" data-action="cue-send" data-id="' + c.id + '">채팅에 전송</button>')
-            + '<button class="adHBtn adAccent" data-action="cue-save" data-id="' + c.id + '">저장</button></div>'
+            ? '<button class="ghHBtn ghDanger" data-action="cue-delete-confirm" data-id="' + c.id + '">삭제 확정</button><button class="ghHBtn" data-action="cue-delete-cancel">취소</button>'
+            : '<button class="ghHBtn ghDanger" data-action="cue-delete" data-id="' + c.id + '">삭제</button>';
+          inner += '<div class="ghCueBody">'
+            + '<textarea id="ghCueText" class="ghCueEdit">' + esc(state.cueDraft != null ? state.cueDraft : (c.text || '')) + '</textarea>'
+            + '<input id="ghCueNote" class="ghCueNote" placeholder="(선택) 각색 방향 — 비워두면 현재 로그에 맞게만 손봐요" value="' + esc(state.cueNote) + '">'
+            + '<div class="ghRow">' + del
+            + '<button class="ghHBtn" data-action="cue-adapt" data-id="' + c.id + '">각색</button>'
+            + '<button class="ghHBtn" data-action="cue-copy" data-id="' + c.id + '">복사</button>'
+            + (state.sendBlocked ? '' : '<button class="ghHBtn" data-action="cue-send" data-id="' + c.id + '">채팅에 전송</button>')
+            + '<button class="ghHBtn ghAccent" data-action="cue-save" data-id="' + c.id + '">저장</button></div>'
             + '</div>';
         }
-        return '<div class="adCueItem' + (open ? ' adCueOpen' : '') + '">' + inner + '</div>';
+        return '<div class="ghCueItem' + (open ? ' ghCueOpen' : '') + '">' + inner + '</div>';
       }).join('') + '</div>'
-        + '<div class="adRow" style="margin-top:10px;justify-content:flex-start"><button class="adHBtn" data-action="cue-add">+ 직접 추가</button>'
-        + '<button class="adHBtn" data-action="cue-generate-more">AD에게 이어서 생성</button></div>';
+        + '<div class="ghRow" style="margin-top:10px;justify-content:flex-start"><button class="ghHBtn" data-action="cue-add">+ 직접 추가</button>'
+        + '<button class="ghHBtn" data-action="cue-generate-more">AD에게 이어서 생성</button></div>';
     }
-    return '<div class="adArcTab">' + status + body + '</div>';
+    return '<div class="ghArcTab">' + status + body + '</div>';
   }
 
   function threadsOfRoom() {
@@ -2794,26 +2818,26 @@
     let items;
     if (!mine.length) {
       items = state.env.isAdCard
-        ? '<div class="adEmpty">…감독님, 지금 제 방에 앉아서 저를 회의실로 부르신 거예요?<br>*웃음* 좋아요. 셀프 회의, 특별히 열어 드릴게요. 「+ 새 회의」요.</div>'
-        : '<div class="adEmpty">이 채팅의 회의가 아직 없습니다.<br>「+ 새 회의」로 AD를 불러보세요.</div>';
+        ? '<div class="ghEmpty">…감독님, 지금 제 방에 앉아서 저를 회의실로 부르신 거예요?<br>*웃음* 좋아요. 셀프 회의, 특별히 열어 드릴게요. 「+ 새 회의」요.</div>'
+        : '<div class="ghEmpty">이 채팅의 회의가 아직 없습니다.<br>「+ 새 회의」로 AD를 불러보세요.</div>';
     } else {
-      items = '<div class="adList">' + mine.map((t) => {
+      items = '<div class="ghList">' + mine.map((t) => {
         const d = t.updatedAt ? new Date(t.updatedAt) : null;
         const when = d ? (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') : '';
         const del = state.deleteTargetId === t.id
-          ? '<button class="adHBtn adDanger" data-action="confirm-delete-thread" data-id="' + t.id + '">삭제 확정</button><button class="adHBtn" data-action="cancel-delete-thread">취소</button>'
-          : '<button class="adHBtn adDanger adSmall" data-action="ask-delete-thread" data-id="' + t.id + '">삭제</button>';
-        return '<div class="adItem" data-action="open-thread" data-id="' + t.id + '">'
+          ? '<button class="ghHBtn ghDanger" data-action="confirm-delete-thread" data-id="' + t.id + '">삭제 확정</button><button class="ghHBtn" data-action="cancel-delete-thread">취소</button>'
+          : '<button class="ghHBtn ghDanger ghSmall" data-action="ask-delete-thread" data-id="' + t.id + '">삭제</button>';
+        return '<div class="ghItem" data-action="open-thread" data-id="' + t.id + '">'
           + '<span>' + esc(t.title || '(제목 없음)') + '</span>'
-          + '<span class="adMeta">' + t.count + '개 · ' + when + '</span>' + del + '</div>';
+          + '<span class="ghMeta">' + t.count + '개 · ' + when + '</span>' + del + '</div>';
       }).join('') + '</div>';
     }
-    const roomTok = '<div class="adTokLine" style="padding:2px 20px 8px">이 채팅에서 AD 호출 누적 ~' + fmtK(state.roomTok.tin) + ' in · ~' + fmtK(state.roomTok.tout) + ' out <span class="adDim">— 회의·아크·큐 전부 포함, 추정치</span></div>';
-    const newBtn = '<div class="adNewRow">'
-      + '<button class="adHBtn adAccent" data-action="new-thread">+ 새 회의</button>'
+    const roomTok = '<div class="ghTokLine" style="padding:2px 20px 8px">이 채팅에서 AD 호출 누적 ~' + fmtK(state.roomTok.tin) + ' in · ~' + fmtK(state.roomTok.tout) + ' out <span class="ghDim">— 회의·아크·큐 전부 포함, 추정치</span></div>';
+    const newBtn = '<div class="ghNewRow">'
+      + '<button class="ghHBtn ghAccent" data-action="new-thread">+ 새 회의</button>'
       + '</div>';
     return roomTok
-      + '<div class="adBody">' + items + newBtn + '</div>';
+      + '<div class="ghBody">' + items + newBtn + '</div>';
   }
 
   function tokLineHtml() {
@@ -2830,31 +2854,31 @@
           + ' · 로그 ' + fmtK(b.log) + ' · 회의 ' + fmtK(lt.hist) + ')';
       }
     }
-    return '<div class="adTokLine">' + line + ' <span class="adDim">— 추정치</span></div>';
+    return '<div class="ghTokLine">' + line + ' <span class="ghDim">— 추정치</span></div>';
   }
 
   function chatHtml() {
     const last = state.thread.messages.length - 1;
     const msgs = state.thread.messages.map((m, i) => renderMessage(m, i, i === last)).join('');
-    const pending = state.sending ? '<div class="adPending" id="adPending">AD가 검토 중…</div>' : '';
+    const pending = state.sending ? '<div class="ghPending" id="ghPending">AD가 검토 중…</div>' : '';
     const entry = state.index.find((t) => t.id === state.thread.id);
     const title = (entry && entry.title) || '(새 회의)';
     const titlePart = state.titleEditing
-      ? '<input id="adTitleInput" class="adTitleInput" maxlength="60" value="' + esc(title) + '">'
-      : '<span class="adSubTitle adTitleClick" data-action="edit-title" title="클릭해서 제목 수정">' + esc(title) + '</span>';
-    return '<div class="adSubBar"><button class="adHBtn" data-action="go-list">← 회의 목록</button>'
+      ? '<input id="ghTitleInput" class="ghTitleInput" maxlength="60" value="' + esc(title) + '">'
+      : '<span class="ghSubTitle ghTitleClick" data-action="edit-title" title="클릭해서 제목 수정">' + esc(title) + '</span>';
+    return '<div class="ghSubBar"><button class="ghHBtn" data-action="go-list">← 회의 목록</button>'
       + titlePart
-      + '<button class="adHBtn" data-action="export-md">md 저장</button>'
-      + '<button class="adHBtn" data-action="new-thread">+ 새 회의</button></div>'
-      + '<div class="adBody" id="adMsgs">' + msgs + pending + '</div>'
-      + '<div class="adInputBar">'
-      + '<textarea id="adInput" placeholder="AD에게 물어보세요… (Ctrl+Enter 전송)"></textarea>'
-      + '<div class="adSendCol">'
-      + '<select class="adModelSel" id="adModelSel">'
+      + '<button class="ghHBtn" data-action="export-md">md 저장</button>'
+      + '<button class="ghHBtn" data-action="new-thread">+ 새 회의</button></div>'
+      + '<div class="ghBody" id="ghMsgs">' + msgs + pending + '</div>'
+      + '<div class="ghInputBar">'
+      + '<textarea id="ghInput" placeholder="AD에게 물어보세요… (Ctrl+Enter 전송)"></textarea>'
+      + '<div class="ghSendCol">'
+      + '<select class="ghModelSel" id="ghModelSel">'
       + '<option value="model"' + (state.settings.modelMode === 'model' ? ' selected' : '') + '>메인 모델</option>'
       + '<option value="otherAx"' + (state.settings.modelMode === 'otherAx' ? ' selected' : '') + '>보조 모델</option>'
       + '</select>'
-      + '<button class="adSend" id="adSendBtn" data-action="send"' + (state.sending ? ' disabled' : '') + '>전송</button>'
+      + '<button class="ghSend" id="ghSendBtn" data-action="send"' + (state.sending ? ' disabled' : '') + '>전송</button>'
       + '</div>'
       + '</div>'
       + tokLineHtml();
@@ -2898,30 +2922,30 @@
 
   function loreEntryEditor(e) {
     const d = state.loreDraft || {};
-    return '<div class="adLoreEdit">'
-      + '<label class="adLoreLbl">이름</label>'
-      + '<input class="adLoreIn" id="adLoreName" value="' + esc(d.comment != null ? d.comment : (e ? e.comment : '')) + '" placeholder="이 항목의 이름">'
-      + '<div class="adLoreRow">'
-      + '<label class="adMChk"><input type="checkbox" id="adLoreAlways"' + (d.alwaysActive ? ' checked' : '') + '>항상 활성화</label>'
-      + '<span class="adDim">' + (d.alwaysActive
+    return '<div class="ghLoreEdit">'
+      + '<label class="ghLoreLbl">이름</label>'
+      + '<input class="ghLoreIn" id="ghLoreName" value="' + esc(d.comment != null ? d.comment : (e ? e.comment : '')) + '" placeholder="이 항목의 이름">'
+      + '<div class="ghLoreRow">'
+      + '<label class="ghMChk"><input type="checkbox" id="ghLoreAlways"' + (d.alwaysActive ? ' checked' : '') + '>항상 활성화</label>'
+      + '<span class="ghDim">' + (d.alwaysActive
         ? '언제나 프롬프트에 들어갑니다'
         : (String(d.key || '').trim()
           ? '아래 키가 대화에 나올 때만 들어갑니다'
           : '키가 비어 있어 대화로는 불러오지 않습니다. 본문에서 조건으로 다루는 항목이면 이대로 두셔도 됩니다')) + '</span>'
       + '</div>'
-      + '<label class="adLoreLbl">활성화 키 <span class="adDim">쉼표로 구분</span></label>'
-      + '<input class="adLoreIn" id="adLoreKey" value="' + esc(d.key != null ? d.key : (e ? e.key : '')) + '"'
+      + '<label class="ghLoreLbl">활성화 키 <span class="ghDim">쉼표로 구분</span></label>'
+      + '<input class="ghLoreIn" id="ghLoreKey" value="' + esc(d.key != null ? d.key : (e ? e.key : '')) + '"'
       + (d.alwaysActive ? ' disabled' : '') + ' placeholder="seoa, 서아, Kim Seoa">'
-      + '<label class="adLoreLbl">본문</label>'
-      + '<textarea class="adLoreArea" id="adLoreContent" placeholder="이 항목의 내용">' + esc(d.content != null ? d.content : (e ? e.content : '')) + '</textarea>'
-      + '<div class="adLoreRow adLoreEnd">'
+      + '<label class="ghLoreLbl">본문</label>'
+      + '<textarea class="ghLoreArea" id="ghLoreContent" placeholder="이 항목의 내용">' + esc(d.content != null ? d.content : (e ? e.content : '')) + '</textarea>'
+      + '<div class="ghLoreRow ghLoreEnd">'
       + (e && state.loreDeleteAsk === 'yes'
-        ? '<span class="adDanger">정말 지울까요?</span><button class="adHBtn adDanger" data-action="lore-delete-go">지웁니다</button><button class="adHBtn" data-action="lore-delete-cancel">취소</button>'
-        : (e ? '<button class="adHBtn adDanger" data-action="lore-delete-ask">삭제</button>' : ''))
+        ? '<span class="ghDanger">정말 지울까요?</span><button class="ghHBtn ghDanger" data-action="lore-delete-go">지웁니다</button><button class="ghHBtn" data-action="lore-delete-cancel">취소</button>'
+        : (e ? '<button class="ghHBtn ghDanger" data-action="lore-delete-ask">삭제</button>' : ''))
       + '<span style="flex:1"></span>'
       // 기존 항목은 헤더를 다시 눌러 접으면 되므로 취소가 중복이다. 접을 헤더가 없는 새 항목에만 둔다.
-      + (e ? '' : '<button class="adHBtn" data-action="lore-cancel">취소</button>')
-      + '<button class="adHBtn adAccent" data-action="lore-save"' + (state.loreBusy ? ' disabled' : '') + '>저장</button>'
+      + (e ? '' : '<button class="ghHBtn" data-action="lore-cancel">취소</button>')
+      + '<button class="ghHBtn ghAccent" data-action="lore-save"' + (state.loreBusy ? ' disabled' : '') + '>저장</button>'
       + '</div></div>';
   }
 
@@ -2931,43 +2955,43 @@
     const gen = isGenerating();
 
     // 로어북은 최상위 탭이라 별도 서브바·타이틀이 없다. 되돌리기는 2차 탭 행 우측에 둔다.
-    let out = '<div class="adBody">';
+    let out = '<div class="ghBody">';
 
-    out += '<div class="adLoreScope">'
-      + '<button class="adSubTab' + (scope === 'card' ? ' adActive' : '') + '" data-action="lore-scope" data-scope="card">카드 로어북<span class="adCnt">' + state.loreCounts.card + '</span></button>'
-      + '<button class="adSubTab' + (scope === 'chat' ? ' adActive' : '') + '" data-action="lore-scope" data-scope="chat">이 채팅만<span class="adCnt">' + state.loreCounts.chat + '</span></button>'
-      + '<span class="adLoreScopeGap"></span>'
-      + '<button class="adGhost" data-action="lore-snaps">↺ 되돌리기</button>'
+    out += '<div class="ghLoreScope">'
+      + '<button class="ghSubTab' + (scope === 'card' ? ' ghActive' : '') + '" data-action="lore-scope" data-scope="card">카드 로어북<span class="ghCnt">' + state.loreCounts.card + '</span></button>'
+      + '<button class="ghSubTab' + (scope === 'chat' ? ' ghActive' : '') + '" data-action="lore-scope" data-scope="chat">이 채팅만<span class="ghCnt">' + state.loreCounts.chat + '</span></button>'
+      + '<span class="ghLoreScopeGap"></span>'
+      + '<button class="ghGhost" data-action="lore-snaps">↺ 되돌리기</button>'
       + '</div>';
     // 되돌리기 패널은 그 버튼 바로 아래에 붙는다 — 설명문을 건너뛴 자리에 열리면 연결이 끊긴다
     if (state.loreSnapOpen) {
-      out += '<div class="adConfirm"><strong>되돌리기</strong>';
+      out += '<div class="ghConfirm"><strong>되돌리기</strong>';
       for (const s of state.loreSnaps) {
-        out += '<div class="adLoreRow"><span style="flex:1">'
+        out += '<div class="ghLoreRow"><span style="flex:1">'
           + (s.scope === 'chat' ? '이 채팅' : '카드') + ' · ' + s.count + '개 · ' + esc(s.note || '저장 전')
-          + '</span><button class="adHBtn" data-action="lore-restore" data-snap="' + s.id + '">이 지점으로</button></div>';
+          + '</span><button class="ghHBtn" data-action="lore-restore" data-snap="' + s.id + '">이 지점으로</button></div>';
       }
-      out += '<div class="adRow"><button class="adGhost" data-action="lore-snaps-close">닫기</button></div></div>';
+      out += '<div class="ghRow"><button class="ghGhost" data-action="lore-snaps-close">닫기</button></div></div>';
     }
 
-    out += '<div class="adSetNote">'
+    out += '<div class="ghSetNote">'
       + (scope === 'card'
         ? '카드 자체의 로어북입니다. 고치면 <b>이 카드의 모든 채팅</b>에 적용됩니다.'
         : '이 채팅에만 있는 로어북입니다. 다른 채팅에는 영향이 없습니다.')
       + '</div>';
 
-    if (gen) out += '<div class="adLoreLock">응답을 만드는 중이라 저장이 잠겨 있어요. 끝나면 풀립니다.</div>';
-    if (state.loreErr) out += '<div class="adMErr">' + esc(state.loreErr) + '</div>';
+    if (gen) out += '<div class="ghLoreLock">응답을 만드는 중이라 저장이 잠겨 있어요. 끝나면 풀립니다.</div>';
+    if (state.loreErr) out += '<div class="ghMErr">' + esc(state.loreErr) + '</div>';
 
-    out += '<div class="adLoreBar">'
-      + '<input class="adLoreIn" id="adLoreQuery" value="' + esc(state.loreQuery) + '" placeholder="이름 · 키 · 본문에서 찾기">'
-      + '<button class="adHBtn adOutline" data-action="lore-new">+ 새로 만들기</button>'
+    out += '<div class="ghLoreBar">'
+      + '<input class="ghLoreIn" id="ghLoreQuery" value="' + esc(state.loreQuery) + '" placeholder="이름 · 키 · 본문에서 찾기">'
+      + '<button class="ghHBtn ghOutline" data-action="lore-new">+ 새로 만들기</button>'
       + '</div>';
 
-    if (state.loreNew) out += '<div class="adLoreItem adLoreOpen">' + loreEntryEditor(null) + '</div>';
+    if (state.loreNew) out += '<div class="ghLoreItem ghLoreOpen">' + loreEntryEditor(null) + '</div>';
 
     if (!rows.length) {
-      out += '<div class="adDim" style="padding:14px 2px">'
+      out += '<div class="ghDim" style="padding:14px 2px">'
         + (state.loreQuery ? '찾는 것이 없어요.' : '이 로어북은 비어 있어요.') + '</div>';
     }
     for (const r of rows) {
@@ -2975,13 +2999,13 @@
       const open = state.loreOpenIdx === r.i;
       const name = (e.comment && e.comment.trim()) ? e.comment.trim() : '(이름 없음)';
       const keys = String(e.key || '').split(',').map((s) => s.trim()).filter(Boolean);
-      out += '<div class="adLoreItem' + (open ? ' adLoreOpen' : '') + '" id="adLoreItem' + r.i + '">'
-        + '<div class="adLoreHead" data-action="lore-open" data-idx="' + r.i + '">'
-        + '<span class="adLoreName">' + esc(name) + '</span>'
-        + (e.alwaysActive ? '<span class="adLoreBadge">항상</span>'
-          : '<span class="adLoreBadge adLoreKeyBadge">키 ' + keys.length + '</span>')
-        + '<span class="adLorePrev">' + esc(String(e.content || '').replace(/\s+/g, ' ').trim().slice(0, 46)) + '</span>'
-        + '<span class="adDim">' + (open ? '▾' : '▸') + '</span>'
+      out += '<div class="ghLoreItem' + (open ? ' ghLoreOpen' : '') + '" id="ghLoreItem' + r.i + '">'
+        + '<div class="ghLoreHead" data-action="lore-open" data-idx="' + r.i + '">'
+        + '<span class="ghLoreName">' + esc(name) + '</span>'
+        + (e.alwaysActive ? '<span class="ghLoreBadge">항상</span>'
+          : '<span class="ghLoreBadge ghLoreKeyBadge">키 ' + keys.length + '</span>')
+        + '<span class="ghLorePrev">' + esc(String(e.content || '').replace(/\s+/g, ' ').trim().slice(0, 46)) + '</span>'
+        + '<span class="ghDim">' + (open ? '▾' : '▸') + '</span>'
         + '</div>';
       if (open) out += loreEntryEditor(e);
       out += '</div>';
@@ -3001,56 +3025,56 @@
     let cleanup;
     if (state.confirmCleanup) {
       const victims = cleanupVictims(state.confirmCleanup);
-      cleanup = '<div class="adConfirm"><strong>삭제 확인</strong>'
+      cleanup = '<div class="ghConfirm"><strong>삭제 확인</strong>'
         + '<div>' + CLEANUP_LABELS[state.confirmCleanup] + ' ' + victims.length + '개를 삭제합니다.</div>'
-        + '<div style="font-size:12.5px;color:var(--adSub)">같은 범위 채팅들의 큐시트·스토리 아크·큐 옵션·토큰 집계도 함께 삭제됩니다.</div>'
-        + (victims.length ? '<div style="font-size:12.5px;color:var(--adSub);line-height:1.8">'
+        + '<div style="font-size:12.5px;color:var(--ghSub)">같은 범위 채팅들의 큐시트·스토리 아크·큐 옵션·토큰 집계도 함께 삭제됩니다.</div>'
+        + (victims.length ? '<div style="font-size:12.5px;color:var(--ghSub);line-height:1.8">'
           + victims.slice(0, 12).map((t) => '· ' + esc((t.charName || '카드?') + ' > ' + (t.chatName || '채팅?') + ' > ' + (t.title || '(제목 없음)'))).join('<br>')
           + (victims.length > 12 ? '<br>… 외 ' + (victims.length - 12) + '개' : '') + '</div>' : '')
-        + '<div class="adRow"><button class="adHBtn adDanger" data-action="run-cleanup">삭제 실행</button>'
-        + '<button class="adHBtn" data-action="cancel-cleanup">취소</button></div></div>';
+        + '<div class="ghRow"><button class="ghHBtn ghDanger" data-action="run-cleanup">삭제 실행</button>'
+        + '<button class="ghHBtn" data-action="cancel-cleanup">취소</button></div></div>';
     } else {
-      cleanup = '<label>AD 데이터 청소 — 회의·큐시트·아크 <span class="adDim">(회의 전체 ' + total + '개' + (env ? ' · 이 카드 ' + cardThreads + '개 · 이 채팅 ' + roomThreads + '개' : '') + ')</span></label>'
-        + '<div class="adRow" style="justify-content:flex-start;flex-wrap:wrap">'
+      cleanup = '<label>AD 데이터 청소 — 회의·큐시트·아크 <span class="ghDim">(회의 전체 ' + total + '개' + (env ? ' · 이 카드 ' + cardThreads + '개 · 이 채팅 ' + roomThreads + '개' : '') + ')</span></label>'
+        + '<div class="ghRow" style="justify-content:flex-start;flex-wrap:wrap">'
         + (env
-          ? '<button class="adHBtn" data-action="ask-cleanup" data-scope="except-card">이 카드 외 삭제</button>'
-            + '<button class="adHBtn" data-action="ask-cleanup" data-scope="except-chat">이 채팅 외 삭제</button>'
-            + '<button class="adHBtn adDanger" data-action="ask-cleanup" data-scope="card">이 카드 삭제</button>'
+          ? '<button class="ghHBtn" data-action="ask-cleanup" data-scope="except-card">이 카드 외 삭제</button>'
+            + '<button class="ghHBtn" data-action="ask-cleanup" data-scope="except-chat">이 채팅 외 삭제</button>'
+            + '<button class="ghHBtn ghDanger" data-action="ask-cleanup" data-scope="card">이 카드 삭제</button>'
           : '')
-        + '<button class="adHBtn adDanger" data-action="ask-cleanup" data-scope="all">전체 삭제</button>'
+        + '<button class="ghHBtn ghDanger" data-action="ask-cleanup" data-scope="all">전체 삭제</button>'
         + '</div>';
     }
 
-    return '<div class="adSubBar">'
-      + (env ? '<button class="adHBtn" data-action="go-back">← 돌아가기</button>' : '<span style="width:92px"></span>')
-      + '<span class="adSubTitle adSetTitle">설정</span>'
+    return '<div class="ghSubBar">'
+      + (env ? '<button class="ghHBtn" data-action="go-back">← 돌아가기</button>' : '<span style="width:92px"></span>')
+      + '<span class="ghSubTitle ghSetTitle">설정</span>'
       + '<span style="width:92px"></span></div>'
-      + '<div class="adBody"><div class="adSet">'
-      + '<div class="adSetBlock"><div class="adSetRow"><label>기본 모델</label><select id="adSetModel">'
+      + '<div class="ghBody"><div class="ghSet">'
+      + '<div class="ghSetBlock"><div class="ghSetRow"><label>기본 모델</label><select id="ghSetModel">'
       + '<option value="model"' + (s.modelMode === 'model' ? ' selected' : '') + '>메인 모델</option>'
       + '<option value="otherAx"' + (s.modelMode === 'otherAx' ? ' selected' : '') + '>보조 모델</option>'
       + '</select></div></div>'
-      + '<div class="adSetBlock"><div class="adSetRow"><label>AD 부르기 팝오버</label>'
-      + '<label class="adSwitch"><input type="checkbox" id="adSetMini"' + (s.miniEnabled ? ' checked' : '') + '><span class="adSlider"></span></label></div>'
-      + '<div class="adSetNote">채팅 화면 위에 🎬 AD 부르기 버튼을 띄웁니다.</div></div>'
-      + '<div class="adSetBlock"><div class="adSetRow"><label>매 턴마다 AD 의견을 자동으로 받기</label>'
-      + '<label class="adSwitch"><input type="checkbox" id="adSetAdvice"' + (s.adviceAuto ? ' checked' : '') + '><span class="adSlider"></span></label></div>'
-      + '<div class="adSetNote">매 출력마다 AD가 현재 진행에 대한 짧은 의견을 냅니다. 켜면 채팅 한 턴마다 모델 호출이 한 번 더 붙어요. 설정을 꺼놔도 팝오버에서 필요할 때 직접 부를 수 있습니다.</div></div>'
-      + '<div class="adSetBlock"><div class="adSetRow"><label>RP 마스터 시점 (로어북 전체 열람)</label>'
-      + '<label class="adSwitch"><input type="checkbox" id="adSetRp"' + (s.rpMaster ? ' checked' : '') + '><span class="adSlider"></span></label></div>'
-      + '<div class="adSetNote">OFF = 상시 활성 로어북만 참조 (플레이어 시점, 스포일러 방지) / ON = 전체 열람</div></div>'
-      + '<div class="adSetBlock"><div class="adSetRow"><label>최근 RP 대화 포함 수</label><input type="number" id="adSetRecent" min="0" max="200" value="' + (s.recentCount | 0) + '"></div>'
-      + '<div class="adSetNote">현재 채팅의 최근 로그를 AD에게 보여줍니다. 유저 입력발화 포함.</div></div>'
-      + '<div class="adSetBlock"><div class="adSetRow"><button class="adHBtn adAccent" data-action="save-settings">설정 저장</button></div></div>'
-      + '<div class="adSetBlock"><div class="adAdv"><div class="adAdvHead" data-action="toggle-adv">고급 — AD에게 추가 요청사항 ' + (state.advOpen ? '▾' : '▸') + '</div>'
+      + '<div class="ghSetBlock"><div class="ghSetRow"><label>AD 부르기 팝오버</label>'
+      + '<label class="ghSwitch"><input type="checkbox" id="ghSetMini"' + (s.miniEnabled ? ' checked' : '') + '><span class="ghSlider"></span></label></div>'
+      + '<div class="ghSetNote">채팅 화면 위에 🎬 AD 부르기 버튼을 띄웁니다.</div></div>'
+      + '<div class="ghSetBlock"><div class="ghSetRow"><label>매 턴마다 AD 의견을 자동으로 받기</label>'
+      + '<label class="ghSwitch"><input type="checkbox" id="ghSetAdvice"' + (s.adviceAuto ? ' checked' : '') + '><span class="ghSlider"></span></label></div>'
+      + '<div class="ghSetNote">매 출력마다 AD가 현재 진행에 대한 짧은 의견을 냅니다. 켜면 채팅 한 턴마다 모델 호출이 한 번 더 붙어요. 설정을 꺼놔도 팝오버에서 필요할 때 직접 부를 수 있습니다.</div></div>'
+      + '<div class="ghSetBlock"><div class="ghSetRow"><label>RP 마스터 시점 (로어북 전체 열람)</label>'
+      + '<label class="ghSwitch"><input type="checkbox" id="ghSetRp"' + (s.rpMaster ? ' checked' : '') + '><span class="ghSlider"></span></label></div>'
+      + '<div class="ghSetNote">OFF = 상시 활성 로어북만 참조 (플레이어 시점, 스포일러 방지) / ON = 전체 열람</div></div>'
+      + '<div class="ghSetBlock"><div class="ghSetRow"><label>최근 RP 대화 포함 수</label><input type="number" id="ghSetRecent" min="0" max="200" value="' + (s.recentCount | 0) + '"></div>'
+      + '<div class="ghSetNote">현재 채팅의 최근 로그를 AD에게 보여줍니다. 유저 입력발화 포함.</div></div>'
+      + '<div class="ghSetBlock"><div class="ghSetRow"><button class="ghHBtn ghAccent" data-action="save-settings">설정 저장</button></div></div>'
+      + '<div class="ghSetBlock"><div class="ghAdv"><div class="ghAdvHead" data-action="toggle-adv">고급 — AD에게 추가 요청사항 ' + (state.advOpen ? '▾' : '▸') + '</div>'
       + (state.advOpen
-        ? '<div class="adAdvBody"><textarea id="adSetPersona" placeholder="AD의 캐릭터는 유지한 채 답변 지침만 보충해요. 예: 답변은 더 짧게 / 선택지 예시를 더 풍부하게 / 용어는 풀어서 설명. 비우면 기본 동작.">' + esc(state.personaDraft != null ? state.personaDraft : (s.personaOverride || '')) + '</textarea>'
-        + '<div class="adRow"><button class="adHBtn" data-action="restore-persona">비우기</button>'
-        + '<button class="adHBtn adAccent" data-action="save-persona">저장</button></div></div>'
+        ? '<div class="ghAdvBody"><textarea id="ghSetPersona" placeholder="AD의 캐릭터는 유지한 채 답변 지침만 보충해요. 예: 답변은 더 짧게 / 선택지 예시를 더 풍부하게 / 용어는 풀어서 설명. 비우면 기본 동작.">' + esc(state.personaDraft != null ? state.personaDraft : (s.personaOverride || '')) + '</textarea>'
+        + '<div class="ghRow"><button class="ghHBtn" data-action="restore-persona">비우기</button>'
+        + '<button class="ghHBtn ghAccent" data-action="save-persona">저장</button></div></div>'
         : '')
       + '</div></div>'
-      + '<div class="adSetBlock">' + cleanup + '</div>'
-      + '<div class="adSetBlock adDim" style="border-bottom:none">AD야 잠깐 와봐 · v' + AD_VERSION + '</div>'
+      + '<div class="ghSetBlock">' + cleanup + '</div>'
+      + '<div class="ghSetBlock ghDim" style="border-bottom:none">AD야 잠깐 와봐 · v' + AD_VERSION + '</div>'
       + '</div></div>';
   }
 
@@ -3062,11 +3086,11 @@
   function scheduleLoreFilter() {
     clearTimeout(loreFilterTimer);
     loreFilterTimer = setTimeout(() => {
-      const before = document.getElementById('adLoreQuery');
+      const before = document.getElementById('ghLoreQuery');
       const pos = before ? before.selectionStart : null;
       state.loreOpenIdx = null;
       render();
-      const again = document.getElementById('adLoreQuery');
+      const again = document.getElementById('ghLoreQuery');
       if (again) {
         again.focus();
         if (pos != null) { try { again.setSelectionRange(pos, pos); } catch (e) {} }
@@ -3092,7 +3116,7 @@
       doc.body.innerHTML = '<style>' + css() + '</style>'
         + (state.surface === 'pill' ? pillHtml() : miniHtml());
       if (state.surface === 'mini' && state.miniTab === 'input') {
-        const ta = doc.getElementById('adMInput');
+        const ta = doc.getElementById('ghMInput');
         if (ta) { ta.value = state.inputDraft || ''; }
       }
       renderPrevScreen = null;
@@ -3108,15 +3132,15 @@
     else if (state.screen === 'lore') inner = loreTabHtml();
     else inner = listHtml();
     // 같은 화면 재렌더 = 스크롤 유지 (innerHTML 교체가 위치를 날려 아코디언 조작마다 최상단 튐)
-    // 로어북 화면의 스크롤 컨테이너는 .adBody다 — .adArcTab만 보면 매번 최상단으로 튄다
-    const scrollSel = (state.screen === 'lore') ? '.adBody' : '.adArcTab';
+    // 로어북 화면의 스크롤 컨테이너는 .ghBody다 — .ghArcTab만 보면 매번 최상단으로 튄다
+    const scrollSel = (state.screen === 'lore') ? '.ghBody' : '.ghArcTab';
     const keepScroll = (renderPrevScreen === state.screen && (state.screen === 'cue' || state.screen === 'arc' || state.screen === 'lore'))
       ? (doc.querySelector(scrollSel) || {}).scrollTop : null;
     renderPrevScreen = state.screen;
     doc.body.dataset.theme = state.settings.theme;
     doc.body.innerHTML = '<style>' + css() + '</style>'
-      + '<div class="adRoot" data-action="backdrop">'
-      + '<div class="adPanel">' + headerHtml() + (state.screen !== 'settings' ? tabsHtml() : '') + inner + '</div>'
+      + '<div class="ghRoot" data-action="backdrop">'
+      + '<div class="ghPanel">' + headerHtml() + (state.screen !== 'settings' ? tabsHtml() : '') + inner + '</div>'
       + '</div>';
     if (keepScroll != null) {
       const tab = doc.querySelector(scrollSel);
@@ -3124,28 +3148,28 @@
     }
     // 항목을 펼쳤으면 그 항목을 본문 맨 위로 올린다 (기획자님 08-26)
     if (state.screen === 'lore' && state.loreOpenIdx != null) {
-      const box = doc.querySelector('.adBody');
-      const item = doc.getElementById('adLoreItem' + state.loreOpenIdx);
+      const box = doc.querySelector('.ghBody');
+      const item = doc.getElementById('ghLoreItem' + state.loreOpenIdx);
       if (box && item) {
         box.scrollTop += item.getBoundingClientRect().top - box.getBoundingClientRect().top;
       }
     }
     if (state.screen === 'chat') {
-      const box = doc.getElementById('adMsgs');
+      const box = doc.getElementById('ghMsgs');
       if (box) box.scrollTop = box.scrollHeight;
-      const input = doc.getElementById('adInput');
+      const input = doc.getElementById('ghInput');
       if (input && state.draftInput) input.value = state.draftInput;
     }
   }
 
   function toast(msg) {
     const doc = document;
-    const old = doc.querySelector('.adToast');
+    const old = doc.querySelector('.ghToast');
     if (old) old.remove();
-    const panel = doc.querySelector('.adPanel') || doc.querySelector('.adMiniWrap');
+    const panel = doc.querySelector('.ghPanel') || doc.querySelector('.ghMiniWrap');
     if (!panel) return;
     const el = doc.createElement('div');
-    el.className = 'adToast';
+    el.className = 'ghToast';
     el.textContent = msg;
     panel.appendChild(el);
     clearTimeout(state.toastTimer);
@@ -3251,7 +3275,7 @@
   }
 
   async function commitTitle(save) {
-    const inp = document.getElementById('adTitleInput');
+    const inp = document.getElementById('ghTitleInput');
     if (!state.titleEditing) return;
     state.titleEditing = false;
     if (save && inp && state.thread) {
@@ -3269,12 +3293,12 @@
   function makeProgress(seq) {
     return (partial) => {
       if (seq !== state.sendSeq) return;
-      const pendingEl = document.getElementById('adPending');
+      const pendingEl = document.getElementById('ghPending');
       if (pendingEl) {
         const live = splitReasoningLive(partial);
-        pendingEl.innerHTML = (live.thinking ? '<div style="color:var(--adSub);font-size:12px">(사고 과정 진행 중…)</div>' : '')
+        pendingEl.innerHTML = (live.thinking ? '<div style="color:var(--ghSub);font-size:12px">(사고 과정 진행 중…)</div>' : '')
           + renderRich(live.content);
-        const box = document.getElementById('adMsgs');
+        const box = document.getElementById('ghMsgs');
         if (box) box.scrollTop = box.scrollHeight;
       }
     };
@@ -3404,11 +3428,11 @@
 
   async function send() {
     if (state.sending || !state.thread) return;
-    const input = document.getElementById('adInput');
+    const input = document.getElementById('ghInput');
     const question = (input ? input.value : '').trim();
     if (!question) return;
 
-    const sel = document.getElementById('adModelSel');
+    const sel = document.getElementById('ghModelSel');
     if (sel && sel.value !== state.settings.modelMode) {
       state.settings.modelMode = sel.value;
       await saveSettings();
@@ -3828,7 +3852,7 @@
           break;
         }
         case 'cue-generate': {
-          const ta = document.getElementById('adCueSeed');
+          const ta = document.getElementById('ghCueSeed');
           const seed = (ta ? ta.value : '').trim();
           state.cueSeed = seed;
           await runCueLLM('create', seed, null);
@@ -3884,7 +3908,7 @@
           render();
           break;
         case 'arc-save': {
-          const ta = document.getElementById('adArcInput');
+          const ta = document.getElementById('ghArcInput');
           if (ta) {
             state.arc = splitReasoning(ta.value).content.trim();
             await saveArc(state.env.room, state.arc);
@@ -3896,7 +3920,7 @@
           break;
         }
         case 'arc-generate': {
-          const ta = document.getElementById('adArcSeed');
+          const ta = document.getElementById('ghArcSeed');
           const seed = (ta ? ta.value : '').trim();
           if (!seed) { toast('구상을 먼저 적어주세요.'); break; }
           state.arcSeed = seed;
@@ -3909,7 +3933,7 @@
           render();
           break;
         case 'arc-adapt-run': {
-          const ta = document.getElementById('adArcAdaptInput');
+          const ta = document.getElementById('ghArcAdaptInput');
           const note = (ta ? ta.value : '').trim();
           state.arcAdaptNote = note; // 실패 시에도 입력 보존
           await runArcLLM('adapt', note);
@@ -3968,15 +3992,15 @@
         case 'edit-title': {
           state.titleEditing = true;
           render();
-          const inp = document.getElementById('adTitleInput');
+          const inp = document.getElementById('ghTitleInput');
           if (inp) { inp.focus(); inp.select(); }
           break;
         }
         case 'msg-branch': await branchFromMessage(parseInt(el.dataset.idx, 10)); break;
         case 'toggle-think': {
-          const wrap = el.closest('.adThink');
+          const wrap = el.closest('.ghThink');
           if (wrap) {
-            const body = wrap.querySelector('.adThinkBody');
+            const body = wrap.querySelector('.ghThinkBody');
             const open = wrap.dataset.open === '1';
             wrap.dataset.open = open ? '0' : '1';
             if (body) body.style.display = open ? 'none' : 'block';
@@ -3985,11 +4009,11 @@
           break;
         }
         case 'save-settings': {
-          const m = document.getElementById('adSetModel');
-          const rp = document.getElementById('adSetRp');
-          const rc = document.getElementById('adSetRecent');
-          const mini = document.getElementById('adSetMini');
-          const adv = document.getElementById('adSetAdvice');
+          const m = document.getElementById('ghSetModel');
+          const rp = document.getElementById('ghSetRp');
+          const rc = document.getElementById('ghSetRecent');
+          const mini = document.getElementById('ghSetMini');
+          const adv = document.getElementById('ghSetAdvice');
           if (m) state.settings.modelMode = m.value;
           if (rp) state.settings.rpMaster = !!rp.checked;
           if (rc) state.settings.recentCount = Math.max(0, Math.min(200, parseInt(rc.value, 10) || 0));
@@ -4032,7 +4056,7 @@
     });
 
     document.addEventListener('focusout', async (ev) => {
-      if (ev.target && ev.target.id === 'adTitleInput') await commitTitle(true);
+      if (ev.target && ev.target.id === 'ghTitleInput') await commitTitle(true);
     });
 
     document.addEventListener('keydown', async (ev) => {
@@ -4047,7 +4071,7 @@
         return;
       }
       if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
-        const input = document.getElementById('adInput');
+        const input = document.getElementById('ghInput');
         if (input && document.activeElement === input) {
           ev.preventDefault();
           await send();
@@ -4059,7 +4083,7 @@
     document.addEventListener('compositionend', (ev) => {
       state.composing = false;
       const id = ev.target && ev.target.id;
-      if (id === 'adLoreQuery') {
+      if (id === 'ghLoreQuery') {
         state.loreQuery = ev.target.value;
         scheduleLoreFilter();
       }
@@ -4067,20 +4091,20 @@
 
     document.addEventListener('input', (ev) => {
       const id = ev.target && ev.target.id;
-      if (id === 'adInput') state.draftInput = ev.target.value;
-      else if (id === 'adArcInput') state.arcDraft = ev.target.value;
-      else if (id === 'adArcSeed') state.arcSeed = ev.target.value;
-      else if (id === 'adArcAdaptInput') state.arcAdaptNote = ev.target.value;
-      else if (id === 'adSetPersona') state.personaDraft = ev.target.value;
-      else if (id === 'adCueSeed') state.cueSeed = ev.target.value;
-      else if (id === 'adCueText') state.cueDraft = ev.target.value;
-      else if (id === 'adCueNote') state.cueNote = ev.target.value;
-      else if (id === 'adMInput') { state.inputDraft = ev.target.value; scheduleAidSave(); }
+      if (id === 'ghInput') state.draftInput = ev.target.value;
+      else if (id === 'ghArcInput') state.arcDraft = ev.target.value;
+      else if (id === 'ghArcSeed') state.arcSeed = ev.target.value;
+      else if (id === 'ghArcAdaptInput') state.arcAdaptNote = ev.target.value;
+      else if (id === 'ghSetPersona') state.personaDraft = ev.target.value;
+      else if (id === 'ghCueSeed') state.cueSeed = ev.target.value;
+      else if (id === 'ghCueText') state.cueDraft = ev.target.value;
+      else if (id === 'ghCueNote') state.cueNote = ev.target.value;
+      else if (id === 'ghMInput') { state.inputDraft = ev.target.value; scheduleAidSave(); }
       // 로어북 폼 — 재렌더가 값을 날리지 않게 초안에 계속 담아 둔다
-      else if (id === 'adLoreName' && state.loreDraft) state.loreDraft.comment = ev.target.value;
-      else if (id === 'adLoreKey' && state.loreDraft) state.loreDraft.key = ev.target.value;
-      else if (id === 'adLoreContent' && state.loreDraft) state.loreDraft.content = ev.target.value;
-      else if (id === 'adLoreQuery') {
+      else if (id === 'ghLoreName' && state.loreDraft) state.loreDraft.comment = ev.target.value;
+      else if (id === 'ghLoreKey' && state.loreDraft) state.loreDraft.key = ev.target.value;
+      else if (id === 'ghLoreContent' && state.loreDraft) state.loreDraft.content = ev.target.value;
+      else if (id === 'ghLoreQuery') {
         state.loreQuery = ev.target.value;
         // 한글 조합 중에는 값만 담아 두고 화면은 건드리지 않는다 (조합이 깨져 자모가 흩어진다)
         if (state.composing || ev.isComposing) return;
@@ -4094,7 +4118,7 @@
     // 화면만 해진다(실기 08-26). 대신 iframe 자체를 포인터를 따라 옮기고,
     // 드래그 동안에는 iframe에 pointer-events:none을 걸어 포인터가 통과하게 한 뒤
     // 루트 문서의 pointermove/pointerup으로 전 구간을 받는다.
-    // 본체(.adDragTarget)의 인라인 스타일은 드래그 내내 손대지 않는다 = 크기가 변할 경로가 없다.
+    // 본체(.ghDragTarget)의 인라인 스타일은 드래그 내내 손대지 않는다 = 크기가 변할 경로가 없다.
     const DRAG_SLOP = 5;
     const DRAG_CLICK_MS = 250;   // 드래그 종료 직후 합성되는 click은 곧바로 온다. 이 시한을 넘으면 사람이 새로 누른 것.
     const DRAG_GEOM = GEOM_BASE + 'pointer-events:none;touch-action:none;';
@@ -4226,7 +4250,7 @@
         await saveSettings();
         return;
       }
-      if (id === 'adLoreAlways' && state.loreDraft) {
+      if (id === 'ghLoreAlways' && state.loreDraft) {
         // 다른 입력값은 화면에서 그대로 걷어 초안에 담고 다시 그린다 (키 입력란 활성/비활성이 바뀐다)
         const d = loreDraftFromDom();
         state.loreDraft = { comment: d.comment, key: d.key, content: d.content, alwaysActive: !!ev.target.checked };
@@ -4234,12 +4258,12 @@
         return;
       }
       if (!state.env || !id) return;
-      if (id !== 'adCueOptSent' && id !== 'adCueOptDlg' && id !== 'adCueOptNpc') return;
+      if (id !== 'ghCueOptSent' && id !== 'ghCueOptDlg' && id !== 'ghCueOptNpc') return;
       const o = state.cueOpts;
-      if (id === 'adCueOptSent') {
+      if (id === 'ghCueOptSent') {
         o.sent = Math.max(1, Math.min(12, parseInt(ev.target.value, 10) || CUE_OPT_DEFAULTS.sent));
         ev.target.value = o.sent;
-      } else if (id === 'adCueOptDlg') o.dialogue = !!ev.target.checked;
+      } else if (id === 'ghCueOptDlg') o.dialogue = !!ev.target.checked;
       else o.npc = !!ev.target.checked;
       await saveCueOpts(state.env.room, o);
     });
@@ -4318,12 +4342,42 @@
   }
   state.ensureHooks = async () => { await ensureReplacer(); await ensureChatListener(); };
 
+  // ★v2.0.7: 유저가 채팅을 연 뒤에 fn을 1회 실행한다(상수 START_POLL_* 주석 참조). 홈 화면(-1)에서는 기다린다.
+  // 인덱스 API가 연속 실패하면 게이트를 포기하고 바로 실행해 예전 동작(2.0.6)으로 돌아간다.
+  function closeStartGate() {
+    state.startGateDone = true;
+    if (state.startTimer) { clearTimeout(state.startTimer); state.startTimer = null; }
+  }
+  function waitForChatThen(fn) {
+    let errs = 0;
+    const tick = async () => {
+      if (state.startGateDone) return;
+      let ci = -1;
+      try { ci = await api.getCurrentCharacterIndex(); errs = 0; } catch (e) { errs++; ci = -1; }
+      // ★감사 반영: await 사이에 언로드되었거나(onUnload → closeStartGate) 유저가 표면을 먼저 열었으면(showFrame →
+      // closeStartGate, 또는 surface/shown) 아무것도 하지 않는다 — 열린 패널/미니를 알약으로 덮어쓰지 않는다.
+      if (state.startGateDone) return;
+      if (state.shown || state.surface !== 'none') { closeStartGate(); return; }
+      if ((typeof ci === 'number' && ci >= 0) || errs >= START_POLL_ERR_MAX) {
+        closeStartGate();
+        try { await fn(); } catch (e) { console.warn('[AD] 팝오버 초기화 실패', e); }
+        return;
+      }
+      if (state.startGateDone) return;
+      state.startTimer = setTimeout(tick, START_POLL_MS);
+    };
+    tick();
+  }
+
   // AD 부르기 팝오버 = 기본 켬. 알약을 띄우고 iframe을 그 크기로 줄인다.
+  // ★v2.0.7: 시작 직후가 아니라 채팅 진입 뒤에 띄운다 — 첫 권한창을 시작 로딩 알림과 분리한다.
   if (state.settings.miniEnabled) {
-    try { await showPill(); } catch (e) { console.warn('[AD] 팝오버 초기화 실패', e); }
+    waitForChatThen(showPill);
   }
 
   await api.onUnload(async () => {
+    // ★v2.0.7: 채팅 진입 대기 폴링 정지
+    closeStartGate();
     try { await api.removeRisuChatListener('output', onOutput); } catch (e) { /* 종료 중 무시 */ }
     try { await api.removeRisuReplacer('beforeRequest', onBeforeRequest); } catch (e) { /* 종료 중 무시 */ }
     try {
