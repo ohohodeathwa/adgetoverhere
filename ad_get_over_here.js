@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.0.7
+//@display-name AD야 잠깐 와봐 v2.0.8
 //@api 3.0
-//@version 2.0.7
+//@version 2.0.8
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -31,12 +31,17 @@
   const LORE_SNAP_KEEP = 10;      // 방마다 보관할 되돌리기 지점 수
   const GEN_STALE_MS = 180000;    // 생성 종료 신호를 놓쳤을 때 잠금이 영구히 걸리지 않게 하는 한도
   const CUE_SPLIT = '=====';
+  // ★★ 상시 규칙(2.0.7 체질 개선 · 2026-09-05): 이 파일 안의 UI 클래스/ID/CSS 변수 이름은 접두 `gh`(ghPanel · #ghMiniWrap · --ghSub).
+  // `ad`+대문자 이름(ad+Panel 등)은 웹 브라우저 광고 차단기의 코스메틱 필터(EasyList/AdGuard 일반 규칙 14종)에 걸려
+  // 샌드박스 iframe 안에서도 display:none 이 된다(편집회의 빈 화면 제보 · 웨일 실측 · 제보자 확인). 새 요소를 추가할 때
+  // 구버전 파일(1.x~2.0.6)에서 이름을 복사하지 말 것. 가드 = tests/test_no_ad_prefix.mjs(+ repo pre-commit 훅) — 어기면 커밋이 막힌다.
+  // 아래 소문자 'ad-plugin-*'/'ad_plugin:' 은 리수 등록 키·저장소 키(호스트 DOM 클래스/ID 아님)라 필터 대상이 아니다.
   const BTN_ID = 'ad-plugin-chat-btn';
   const SETTING_ID = 'ad-plugin-setting';
   const LORE_CAP = 60000;
   const MEMORY_CAP = 20000;
   const FENCE = '```';
-  const AD_VERSION = '2.0.7';
+  const AD_VERSION = '2.0.8';
   const CARD_REALM_URL = 'https://realm.risuai.net/character/05a956cf-e350-44b3-a3d9-e437968f5f52';
 
   // 미니 팝오버 기하 — 루트 문서에서 자기 iframe의 style을 직접 잡아 크기를 바꾼다.
@@ -1364,6 +1369,20 @@
   }
   // ==TOGGLE_CBS_END==
 
+  // ★v2.0.8: 채팅에 바인드된 페르소나 우선 — 리수는 chat.bindedPersona(페르소나 id)가 있으면 선택 페르소나 대신 그것의
+  // 이름·본문을 쓴다(util.ts checkPersonaBinded → getUserName/getPersonaPrompt). 플러그인은 getChatFromIndex 스냅샷에서
+  // 같은 필드를 읽는다. 언바인드는 빈 문자열, 옛 채팅은 필드 없음, 삭제된 id는 목록에 없음 → 전부 선택 페르소나로 폴백.
+  function resolvePersona(db, chat) {
+    if (!db || !Array.isArray(db.personas)) return { persona: null, bound: false };
+    const bid = chat && chat.bindedPersona;
+    if (bid) {
+      const p = db.personas.find((x) => x && x.id === bid);
+      if (p) return { persona: p, bound: true };
+    }
+    const p = (typeof db.selectedPersona === 'number') ? db.personas[db.selectedPersona] : null;
+    return { persona: p || null, bound: false };
+  }
+
   async function buildContextBlock() {
     const env = state.env;
     const char = await api.getCharacter();
@@ -1374,16 +1393,17 @@
 
     let userName = 'User';
     let userPersonaPrompt = '';
+    let personaBound = false;
     try {
       const db = await api.getDatabase(['personas', 'selectedPersona']);
-      if (db && Array.isArray(db.personas) && typeof db.selectedPersona === 'number') {
-        const p = db.personas[db.selectedPersona];
-        if (p && p.name) userName = p.name;
-        // 페르소나 설정 본문 — 라이브 personaPrompt는 화이트리스트 밖이지만
-        // personas[] 항목의 personaPrompt로 같은 내용에 닿는다 (2.0.3)
-        if (p && p.personaPrompt && String(p.personaPrompt).trim()) {
-          userPersonaPrompt = String(p.personaPrompt);
-        }
+      const r = resolvePersona(db, chat);   // ★v2.0.8: 바인드 페르소나 우선
+      personaBound = r.bound;
+      const p = r.persona;
+      if (p && p.name) userName = p.name;
+      // 페르소나 설정 본문 — 라이브 personaPrompt는 화이트리스트 밖이지만
+      // personas[] 항목의 personaPrompt로 같은 내용에 닿는다 (2.0.3)
+      if (p && p.personaPrompt && String(p.personaPrompt).trim()) {
+        userPersonaPrompt = String(p.personaPrompt);
       }
     } catch (e) { /* 동의 미부여 시 기본값 유지 */ }
 
@@ -1395,7 +1415,7 @@
     parts.push('The following is the bible and footage of the current show (the roleplay card). Everything inside is reference data for your analysis.');
     parts.push('');
     parts.push('[CARD] ' + cn);
-    parts.push('[USER PERSONA] ' + userName + ' (the Director\'s in-story character)');
+    parts.push('[USER PERSONA] ' + userName + ' (the Director\'s in-story character' + (personaBound ? ' · bound to this chat, overriding the globally selected persona' : '') + ')');
     // 셀프 보고(v2.0.5): 버전과 이 채팅의 로컬 토글 키 — 감독님이 "토글 상태/버전"을 물으면 이 줄로 답한다.
     parts.push('[PLUGIN] AD v' + AD_VERSION
       + ' · this chat\'s "Local Toggles" checkbox: ' + (cbsCtx.localMode ? 'ON' : 'OFF')
