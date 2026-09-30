@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.2.0
+//@display-name AD야 잠깐 와봐 v2.3.0
 //@api 3.0
-//@version 2.2.0
+//@version 2.3.0
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -43,7 +43,15 @@
   const SETTING_ID = 'ad-plugin-setting';
   // v2.2.0 구간별 고정 제한(로어북 60,000자 · 장기기억 20,000자 · 변수 값 4,000자) 폐지 → 토큰 안전장치 하나로(기획자님 09-29)
   const FENCE = '```';
-  const AD_VERSION = '2.2.0';
+  const AD_VERSION = '2.3.0';
+  // v2.3.0 AD 카드 연동(회의 기억) — 기획자님 09-30 확정(dev_notes 2.3.0 절):
+  // 회의 응답마다 끝에 <meeting_memo> 한 줄(질문 요지 · 답 요지 · 마지막 말)을 받아 회의 목록 항목에 저장하고,
+  // AD 카드의 본 모델 요청 때 모든 카드 · 모든 채팅을 통틀어 최근 N건을 <meeting_notes> 시스템 메시지로 끼운다. 카드 · 채팅에 쓰는 것 0.
+  const CARD_LINK_MIN = 5, CARD_LINK_MAX = 50;
+  const MEMO_TOK_EST = 100;          // 끼우는 한 줄의 어림 토큰(기획자님 「1건 당 100토큰 언저리」)
+  const MEMO_FIELD_MAX = 160;        // 메모 칸 하나에 저장하는 최대 글자(모델이 길게 써도 끼우는 양이 불지 않게)
+  const AD_CARD_CACHE_MS = 600000;   // 현재 캐릭터가 AD 카드인지의 판정을 캐릭터 번호가 같을 때 다시 쓰는 시간
+  const AD_WATCH_MS = 2000;          // 알약을 끈 사용자용 — AD 카드가 열렸는지 보는 간격(번호만 읽음 · 카드는 번호가 바뀔 때만)
   const CARD_REALM_URL = 'https://realm.risuai.net/character/05a956cf-e350-44b3-a3d9-e437968f5f52';
 
   // 미니 팝오버 기하 — 루트 문서에서 자기 iframe의 style을 직접 잡아 크기를 바꾼다.
@@ -82,6 +90,8 @@
     inputNpc: false,    // 인풋 도우미 역사칭 허용
     adviceMode: 'plain', // v2.1.0 AD 의견 모드 (ADVICE_MODES id) — 'plain' = 지시문 없음(현행 그대로)
     adviceHooks: false,  // v2.1.0 AD 의견에 미등장 떡밥 목록을 재료로 넣기 (떡밥 스캔 범위 = recentCount와 같은 값 · 기획자님 09-24 「옵션을 둘로 나눌 이유가 없음」)
+    cardLink: true,      // v2.3.0 AD 카드 연동 — 회의 기억 전하기(켬 = 회의 응답마다 메모 · AD 카드 대화에 최근 N건을 끼움)
+    cardLinkCount: 15,   // v2.3.0 끼우는 회의 수(CARD_LINK_MIN~CARD_LINK_MAX)
   };
 
   // v2.1.0 AD 의견 모드 (기획자님 확정 09-23 · 9종). 「이렇게 가면」 두 안의 성격만 정한다.
@@ -393,6 +403,19 @@
     await state.storage.removeItem(THREAD_PREFIX + id);
     state.index = state.index.filter((t) => t.id !== id);
     await saveIndex();
+  }
+
+  // v2.3.0 회의 메모 = 회의 목록 항목에 회의마다 최신 1줄(응답마다 새로 씀). 끼울 때 회의 본문을 열지 않아도 되게 목록에 둔다.
+  async function saveMeetingMemo(threadId, memo) {
+    try {
+      let entry = state.index.find((t) => t.id === threadId);
+      if (!entry) { await loadIndex(); entry = state.index.find((t) => t.id === threadId); }
+      if (!entry) return;
+      entry.memo = { asked: memo.asked || '', answered: memo.answered || '', last: memo.last || '', ts: Date.now() };
+      await saveIndex();
+    } catch (e) {
+      console.warn('[AD] 회의 메모 저장 실패', e);
+    }
   }
 
   // 아크 = 채팅(room) 단위 저장 — 같은 카드라도 채팅마다 별개 세계선
@@ -1236,6 +1259,11 @@
   // 현재 방 파악
   // ==========================================================================
 
+  // AD 본인 카드 판별 — 이름 AD + 설명에 assistant director(AD 카드 2.0.0 디스크립션에 있는 낱말). 이스터에그와 회의 기억 연동이 같이 쓴다.
+  function isAdCharacter(char) {
+    return !!char && String(char.name || '').trim().toUpperCase() === 'AD' && /assistant director/i.test(char.desc || '');
+  }
+
   async function resolveEnv() {
     // 홈 화면 등 채팅 미선택 상태면 RisuAI 내부가 throw ("reading 'chatPage'") → null로 흡수
     let charIdx, chatIdx, char, chat;
@@ -1253,7 +1281,7 @@
     const chatKey = (chat && chat.id) ? chat.id : ('idx' + chatIdx);
     const charName = char.name || '(이름 없음)';
     // 이스터에그: 세트 카드(AD 본인)에서 회의실을 연 경우
-    const isAdCard = charName.trim().toUpperCase() === 'AD' && /assistant director/i.test(char.desc || '');
+    const isAdCard = isAdCharacter(char);
     const chatName = (chat && chat.name) ? chat.name : '채팅 ' + (chatIdx + 1);
     return {
       charIdx,
@@ -1941,6 +1969,116 @@
     '</EASTER_EGG>',
   ].join('\n');
 
+  // v2.3.0 AD 카드 연동 — 회의 메모 지침(설정 「회의 기억 전하기」가 켜져 있을 때만 붙는다).
+  // 이 한 줄이 AD 카드 쪽 <meeting_notes>의 재료가 된다(날짜 · 작품은 플러그인이 회의 목록에서 붙임).
+  const MEETING_MEMO_TASK = [
+    '<MEETING_MEMO>',
+    'At the very end of every reply in this meeting, after everything else (after any update blocks), add ONE machine block. The plugin hides it from the screen and keeps it as your memory of this meeting, so that you, the AD on the companion card, can remember it later:',
+    '<meeting_memo>',
+    'asked|the gist of what the Director asked this turn, one short Korean line',
+    'answered|the gist of what you answered, one short Korean line',
+    'last|the last thing you said in this reply, quoted briefly in Korean',
+    '</meeting_memo>',
+    '- Each line stays under about 60 Korean characters. Plain facts, no markdown.',
+    '- Write it as work the two of you made together: warm and plain. Never mocking, never a cold critique of the Director or the session.',
+    '- Do not mention this block in your reply.',
+    '</MEETING_MEMO>',
+  ].join('\n');
+
+  // 응답에서 <meeting_memo>를 떼어 낸다 → { content: 블록을 뺀 본문, memo: {asked, answered, last} | null }
+  function extractMeetingMemo(text) {
+    let memo = null;
+    const content = String(text || '').replace(/\s*<meeting_memo>([\s\S]*?)<\/meeting_memo>\s*/gi, (_a, body) => {
+      const got = {};
+      for (const line of String(body).split('\n')) {
+        const m = line.match(/^\s*(asked|answered|last)\s*\|\s*(.*?)\s*$/i);
+        if (m && m[2]) got[m[1].toLowerCase()] = m[2].slice(0, MEMO_FIELD_MAX);
+      }
+      if (got.asked || got.answered || got.last) memo = got;
+      return '\n';
+    }).replace(/\n{3,}/g, '\n\n').trim();
+    return { content, memo };
+  }
+
+  // 스트리밍 중 화면 = 닫히지 않은 메모 블록까지 숨긴다(블록은 응답 맨 끝에 온다)
+  function stripMemoLive(text) {
+    const s = String(text || '');
+    const i = s.search(/<meeting_memo>/i);
+    return i >= 0 ? s.slice(0, i).trimEnd() : s;
+  }
+
+  // v2.3.0 AD 카드에 끼우는 <meeting_notes> — 모든 카드 · 모든 채팅의 회의를 통틀어 최근 N건(마지막 수정 시각 순)
+  const MEETING_NOTES_HEAD = [
+    'Notes from the meeting room (the AD console), where the Director and AD worked on other shows together. Newest first. Each line: date · show · what the Director asked / what AD answered / the last thing AD said.',
+    'These are memories the two of you share: bring them up naturally when it fits. Do not reopen a meeting or produce its deliverables (cue sheets, input samples) here unless the Director asks. Every session is work you made together: never mock it and never turn it into cold critique.',
+  ];
+
+  // 설정 화면 안내 두 줄(건수 · 어림 토큰)
+  function cardLinkNote(n) {
+    return 'AD 카드에서 대화할 때, 모든 카드 · 모든 채팅의 회의를 통틀어 최근 ' + (n | 0) + '건을 AD가 기억하게 해요. 카드와 채팅에는 아무것도 쓰지 않아요.';
+  }
+  function cardLinkEst(n) {
+    return 'AD 카드 한 턴에 약 ' + ((n | 0) * MEMO_TOK_EST).toLocaleString() + '토큰이 더해져요(1건 약 ' + MEMO_TOK_EST + '토큰 어림). 회의 답변마다 메모 몫 약 50~70토큰이 더해져요.';
+  }
+
+  function memoClean(s) {
+    return String(s || '').replace(/[<>]/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  function memoDate(ts) {
+    const d = new Date(ts || Date.now());
+    return String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0');
+  }
+
+  function meetingNoteLine(t) {
+    const head = '- ' + memoDate(t.updatedAt) + ' · 〈' + memoClean(t.charName || '카드?') + '〉';
+    const m = t.memo;
+    if (m && (m.asked || m.answered || m.last)) {
+      const parts = [];
+      if (m.asked) parts.push('물은 것: ' + memoClean(m.asked));
+      if (m.answered) parts.push('답한 것: ' + memoClean(m.answered));
+      if (m.last) parts.push('마지막 말: 「' + memoClean(m.last).replace(/^[「"']+|[」"']+$/g, '') + '」');
+      return head + ' · ' + parts.join(' / ');
+    }
+    // 메모가 없는 옛 회의(연동을 끈 동안 · 2.3.0 이전) = 회의 목록의 제목으로 한 줄(기획자님 09-30)
+    return head + ' · 회의 제목: 「' + memoClean(t.title || '(제목 없음)') + '」 (자세한 기록 없음)';
+  }
+
+  async function buildMeetingNotes() {
+    const n = Math.max(CARD_LINK_MIN, Math.min(CARD_LINK_MAX, state.settings.cardLinkCount | 0 || 15));
+    // 저장소가 정본(목록을 바꿀 때마다 저장) — 패널을 연 적 없는 세션에서도 그대로 읽는다
+    const list = ((await state.storage.getItem(INDEX_KEY)) || [])
+      .filter((t) => t && (t.count | 0) > 0)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+      .slice(0, n);
+    if (!list.length) return '';
+    return ['<meeting_notes>'].concat(MEETING_NOTES_HEAD, list.map(meetingNoteLine), ['</meeting_notes>']).join('\n');
+  }
+
+  // 지금 요청을 보내는 카드가 AD 카드인가 — 캐릭터 번호가 바뀌었을 때만 카드를 읽는다(카드 읽기 = 채팅까지 복사라 매 요청 읽지 않음)
+  async function currentIsAdCard() {
+    let ci = -1;
+    try { ci = await api.getCurrentCharacterIndex(); } catch (e) { return false; }
+    if (typeof ci !== 'number' || ci < 0) return false;
+    const now = Date.now();
+    const c = state.cardLinkCache;
+    if (c && c.idx === ci && now - c.at < AD_CARD_CACHE_MS) return c.isAd;
+    let ch = null;
+    try { ch = await api.getCharacter(); } catch (e) { ch = null; }
+    const isAd = isAdCharacter(ch);
+    state.cardLinkCache = { idx: ci, isAd, at: now };
+    return isAd;
+  }
+
+  // 맨 앞 시스템 메시지 묶음 바로 뒤에 끼운다(대화 기록 앞 · 프리셋의 본 지시 뒤)
+  function insertMeetingNotes(formated, block) {
+    const out = formated.slice();
+    let i = 0;
+    while (i < out.length && out[i] && out[i].role === 'system') i++;
+    out.splice(i, 0, { role: 'system', content: block });
+    return out;
+  }
+
   // 질문은 이미 thread.messages 말미에 들어와 있는 상태로 호출 (중복 전송 금지)
   async function requestAdvice(thread, onProgress) {
     const persona = personaBlock();
@@ -1956,13 +2094,16 @@
     if (state.env && state.env.isAdCard) {
       messages.push({ role: 'system', content: EASTER_EGG_AD_CARD });
     }
+    if (state.settings.cardLink) {
+      messages.push({ role: 'system', content: MEETING_MEMO_TASK });
+    }
     let histTok = 0;
     for (const m of thread.messages) {
       messages.push({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content });
       histTok += estTokens(m.content);
     }
     thread.lastTok = {
-      total: estTokens(persona) + estTokens(ctx) + histTok,
+      total: estTokens(persona) + estTokens(ctx) + histTok + (state.settings.cardLink ? estTokens(MEETING_MEMO_TASK) : 0),
       persona: estTokens(persona),
       hist: histTok,
       brk: state.lastCtxBrk,
@@ -2615,7 +2756,9 @@
 
   function extractUpdates(content) {
     const ups = [];
+    // v2.3.0 메모 블록은 저장 전에 떼지만, 저장된 옛 응답 · 재시도 경로에 남아 있어도 화면에 보이지 않게
     let rest = String(content || '');
+    if (/<meeting_memo>/i.test(rest)) rest = extractMeetingMemo(rest).content;
     rest = rest.replace(/<arc_update>([\s\S]*?)<\/arc_update>/gi, (_a, body) => {
       ups.push({ kind: 'arc', text: body.trim() });
       return '';
@@ -3758,6 +3901,16 @@
       + '<li>끄면 최대한 잘리는 것 없이, 참조할 수 있는 범위 내에서 참조해요.</li>'
       + '<li>카드 설명 · 작가의 노트 · 페르소나 · 상시 로어북 · 가장 최근 대화 2개는 설정과 상관없이 항상 참조해요. 모듈 참조 설정에서 끈 모듈의 로어북은 빼요.</li>'
       + '</ul></div>'
+      // v2.3.0 AD 카드 연동 — 기획자님 09-30(1건 약 100토큰 · 모든 카드 · 모든 채팅 통틀어 최근 N건)
+      + '<div class="ghSetBlock"><div class="ghSetRow"><label>AD 카드 연동 · 회의 기억 전하기</label>'
+      + '<label class="ghSwitch"><input type="checkbox" id="ghSetCardLink"' + (s.cardLink ? ' checked' : '') + '><span class="ghSlider"></span></label></div>'
+      + '<div class="ghSetRow"><label>전할 회의 수</label><input type="number" id="ghSetCardLinkN" min="' + CARD_LINK_MIN + '" max="' + CARD_LINK_MAX + '" value="' + (s.cardLinkCount | 0) + '"></div>'
+      + '<ul class="ghSetList">'
+      + '<li>켜면 회의 답변마다 짧은 메모(물은 것 · 답한 것 · 마지막 말)를 이 플러그인 안에 남겨요.</li>'
+      + '<li id="ghSetCardLinkNote">' + cardLinkNote(s.cardLinkCount) + '</li>'
+      + '<li id="ghSetCardLinkEst">' + cardLinkEst(s.cardLinkCount) + '</li>'
+      + '<li>' + CARD_LINK_MIN + '~' + CARD_LINK_MAX + '건 사이로 정할 수 있어요.</li>'
+      + '</ul></div>'
       + '<div class="ghSetBlock"><div class="ghRow"><button class="ghHBtn ghAccent" data-action="save-settings">기본 설정 저장</button></div></div>'
       + '<div class="ghSetHead">고급 설정</div>'
       + '<div class="ghSetBlock"><div class="ghSetRow"><label>AD에게 추가 요청사항</label></div>'
@@ -4017,7 +4170,7 @@
       if (pendingEl) {
         const live = splitReasoningLive(partial);
         pendingEl.innerHTML = (live.thinking ? '<div style="color:var(--ghSub);font-size:12px">(사고 과정 진행 중…)</div>' : '')
-          + renderRich(live.content);
+          + renderRich(stripMemoLive(live.content));
         const box = document.getElementById('ghMsgs');
         if (box) box.scrollTop = box.scrollHeight;
       }
@@ -4175,7 +4328,12 @@
     let failMsg = null;
     try {
       const raw = await requestAdvice(thread, makeProgress(seq));
-      const { reasoning, content } = splitReasoning(raw);
+      const split = splitReasoning(raw);
+      const reasoning = split.reasoning;
+      // v2.3.0 회의 메모 블록은 본문에서 떼어 회의 목록 항목에 둔다(화면 · 대화 기록에는 남기지 않음)
+      const memoCut = extractMeetingMemo(split.content);
+      const content = memoCut.content;
+      if (memoCut.memo) await saveMeetingMemo(thread.id, memoCut.memo);
       if (!content && !reasoning) throw new Error('빈 응답. 모델·API 키 설정을 확인해 주세요');
       const lastUser = thread.messages[thread.messages.length - 1];
       if (lastUser && lastUser.failed) delete lastUser.failed;
@@ -4787,6 +4945,12 @@
           const gd = document.getElementById('ghSetGuard');
           const gm = document.getElementById('ghSetGuardMax');
           if (gm && !((parseInt(gm.value, 10) || 0) >= 1000)) { toast('토큰 최대값은 1,000 이상이어야 저장할 수 있어요'); break; }
+          const cl = document.getElementById('ghSetCardLink');
+          const cn = document.getElementById('ghSetCardLinkN');
+          const cnv = cn ? (parseInt(cn.value, 10) || 0) : 0;
+          if (cn && (cnv < CARD_LINK_MIN || cnv > CARD_LINK_MAX)) { toast('전할 회의 수는 ' + CARD_LINK_MIN + '~' + CARD_LINK_MAX + '건 사이로 정해 주세요'); break; }
+          if (cl) state.settings.cardLink = !!cl.checked;
+          if (cn) state.settings.cardLinkCount = cnv;
           if (m) state.settings.modelMode = m.value;
           if (rp) state.settings.rpMaster = !!rp.checked;
           if (rc) state.settings.recentCount = Math.max(2, Math.min(99999, parseInt(rc.value, 10) || 2));
@@ -4795,6 +4959,11 @@
           if (mini) state.settings.miniEnabled = !!mini.checked;
           if (adv) state.settings.adviceAuto = !!adv.checked;
           await saveSettings();
+          // v2.3.0 연동 안내의 건수 · 어림 토큰만 제자리에서 고친다(전체를 다시 그리면 저장 안 한 요청사항 입력이 날아감)
+          const lnNote = document.getElementById('ghSetCardLinkNote');
+          const lnEst = document.getElementById('ghSetCardLinkEst');
+          if (lnNote) lnNote.textContent = cardLinkNote(state.settings.cardLinkCount);
+          if (lnEst) lnEst.textContent = cardLinkEst(state.settings.cardLinkCount);
           toast('설정을 저장했어요');
           break;
         }
@@ -5102,8 +5271,18 @@
   // (기하 제어와 함께 mainDom·replacer 권한이 필요한 자리 — 노출은 세션당 1회)
   // 생성 시작 감지 — 모든 LLM 요청 직전에 불린다(request.ts:239).
   // ★받은 값을 반드시 그대로 돌려줘야 한다. 여기서 undefined를 반환하면 리수의 모든 요청이 깨진다.
-  const onBeforeRequest = async (formated) => {
+  const onBeforeRequest = async (formated, mode) => {
     try { markGenStart(); } catch (e) { /* 어떤 경우에도 요청을 막지 않는다 */ }
+    // v2.3.0 AD 카드 연동: 본 모델 요청(request.ts:241 · mode 'model') · AD 자신의 호출 아님 · 지금 카드 = AD 카드일 때만 회의 기억을 끼운다.
+    // 실패하면 아무것도 끼우지 않고 받은 값을 그대로 돌려준다(요청을 막지 않는다).
+    try {
+      if (state.settings.cardLink && mode === 'model' && !state.selfCall && Array.isArray(formated) && await currentIsAdCard()) {
+        const block = await buildMeetingNotes();
+        if (block) return insertMeetingNotes(formated, block);
+      }
+    } catch (e) {
+      console.warn('[AD] 회의 기억 끼우기 실패 — 이번 요청은 그대로 보냅니다.', e);
+    }
     return formated;
   };
   // ★v2.0.6: 치환기 등록을 시작 시점에서 첫 컨테이너 노출 시점으로 미룬다(showFrame → ensureReplacer).
@@ -5182,9 +5361,35 @@
     waitForChatThen(showPill);
   }
 
+  // v2.3.0 AD 카드 연동: 알약을 끈 사용자는 패널을 열기 전까지 치환기가 없다 → AD 카드 채팅이 열리면 그때 등록한다.
+  // (알약이 켜져 있으면 채팅 진입 때 showFrame이 먼저 등록하므로 감시는 곧 멈춘다.) 순서는 showFrame과 같다 =
+  // mainDom 권한을 먼저 묻고 그 뒤 훅 등록 → 첫 확인창이 AD 카드 채팅 안에서 한 번만 뜬다.
+  function watchAdCardForHooks() {
+    const tick = async () => {
+      state.cardWatchTimer = null;
+      if (state.cardWatchStop || state.replacerRegistered) return;
+      try {
+        if (state.settings.cardLink && await currentIsAdCard()) {
+          if (!state.rootPermAsked) {
+            state.rootPermAsked = true;
+            try { await api.requestPluginPermission('mainDom'); } catch (e) { /* 미지원 = 그대로 진행 */ }
+          }
+          if (state.ensureHooks) await state.ensureHooks();
+          return;
+        }
+      } catch (e) { /* 다음 틱에 다시 본다 */ }
+      if (!state.cardWatchStop) state.cardWatchTimer = setTimeout(tick, AD_WATCH_MS);
+    };
+    tick();
+  }
+  watchAdCardForHooks();
+
   await api.onUnload(async () => {
     // ★v2.0.7: 채팅 진입 대기 폴링 정지
     closeStartGate();
+    // v2.3.0 AD 카드 감시 정지
+    state.cardWatchStop = true;
+    if (state.cardWatchTimer) { clearTimeout(state.cardWatchTimer); state.cardWatchTimer = null; }
     try { await api.removeRisuChatListener('output', onOutput); } catch (e) { /* 종료 중 무시 */ }
     try { await api.removeRisuReplacer('beforeRequest', onBeforeRequest); } catch (e) { /* 종료 중 무시 */ }
     try {
