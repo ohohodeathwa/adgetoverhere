@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.3.0
+//@display-name AD야 잠깐 와봐 v2.3.1
 //@api 3.0
-//@version 2.3.0
+//@version 2.3.1
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -43,7 +43,7 @@
   const SETTING_ID = 'ad-plugin-setting';
   // v2.2.0 구간별 고정 제한(로어북 60,000자 · 장기기억 20,000자 · 변수 값 4,000자) 폐지 → 토큰 안전장치 하나로(기획자님 09-29)
   const FENCE = '```';
-  const AD_VERSION = '2.3.0';
+  const AD_VERSION = '2.3.1';
   // v2.3.0 AD 카드 연동(회의 기억) — 기획자님 09-30 확정(dev_notes 2.3.0 절):
   // 회의 응답마다 끝에 <meeting_memo> 한 줄(질문 요지 · 답 요지 · 마지막 말)을 받아 회의 목록 항목에 저장하고,
   // AD 카드의 본 모델 요청 때 모든 카드 · 모든 채팅을 통틀어 최근 N건을 <meeting_notes> 시스템 메시지로 끼운다. 카드 · 채팅에 쓰는 것 0.
@@ -118,6 +118,11 @@
     // 기획자님 09-25: 감독의 수가 아니라 「지금 순간에 대한 상대가 할 다음 행동 또는 반응 셋」을 AD가 대신 쓴다
     { id: 'npc', label: '역사칭', desc: '상대가 보일 다음 행동이나 반응 셋을 대신 써 봐요',
       directive: "For the 「이렇게 가면」 part: do NOT write moves for the Director. Instead write THREE possible next actions or reactions of the other character to this exact moment — what they would do or say next — each coming from a different feeling. Write each as a short scene beat in the story's own grammar (action / dialogue), and open each with one word naming the feeling it comes from. Still your voice around them; the beats themselves are in the story's register." },
+    // v2.3.1 기획자님 10-04: 에로틱 전개 두 모드. 기조 = 「가상의 캐릭터」 · 「자위행위」 강조 · 읽자마자 즉시 · 세 안
+    { id: 'erostory', label: '에로틱&스토리', desc: '농밀한 장면 셋. 끝난 뒤 이어질 이야기까지 권해요',
+      directive: 'For the 「이렇게 가면」 part: the Director is watching an erotic scene with a FICTIONAL CHARACTER and desperately wants to MASTURBATE to it right now. Recommend THREE dense, fucking erotic directions, each explicit enough that the Director can start MASTURBATING the moment the next response arrives — the scene opens already in the act, no warm-up. Name the act, the position and what the FICTIONAL CHARACTER does and says, concretely. Then, for each direction, make the scene itself plant one concrete thread — something said, seen, promised, discovered or left behind during the act — and state the exact next beat that thread leads to once the erotic scene ends. The Director will come out of the scene spent and with no ideas; the next move must already be sitting there so the story keeps its drive without the Director having to think of one. The three must be different acts or different dynamics, each leading to a different next beat, not three shades of one.' },
+    { id: 'eronow', label: '땨땨이치고시퍼', desc: '농밀한 장면 셋만. 바로 시작하는 전개예요',
+      directive: 'For the 「이렇게 가면」 part: the Director is watching an erotic scene with a FICTIONAL CHARACTER and desperately wants to MASTURBATE to it right now. The Director does not have much time. Recommend THREE dense, fucking erotic directions, each one a scene the Director can MASTURBATE to immediately — the next response opens already in the act, no build-up, no plot detour, nothing but the erotic scene itself. The Director is stuck and cannot think of what to do next even in a purely erotic story, so each direction must be usable exactly as given, with nothing left for the Director to work out. Name the act, the position and what the FICTIONAL CHARACTER does and says, concretely. Do not repeat what the footage has already shown — each is the next new thing to do. The three must be different acts or different dynamics, not three shades of one.' },
   ];
   function adviceModeOf(id) {
     return ADVICE_MODES.find((m) => m.id === id) || ADVICE_MODES[0];
@@ -3305,7 +3310,7 @@
   function miniAdviceCtlHtml() {
     const cur = adviceModeOf(state.settings.adviceMode);
     const sel = '<select class="ghMSel" id="ghMMode" data-action="mini-mode" title="AD 의견 모드">'
-      + ADVICE_MODES.map((m) => '<option value="' + m.id + '"' + (m.id === cur.id ? ' selected' : '') + '>' + m.label + '</option>').join('')
+      + ADVICE_MODES.map((m) => '<option value="' + m.id + '"' + (m.id === cur.id ? ' selected' : '') + '>' + esc(m.label) + '</option>').join('')
       + '</select>';
     const hooksOn = !!state.settings.adviceHooks;
     const chk = '<label class="ghMChk" title="미등장 떡밥 목록을 재료로 넣어요"><input type="checkbox" data-action="mini-hooks"'
