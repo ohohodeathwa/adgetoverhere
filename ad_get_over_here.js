@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.3.2
+//@display-name AD야 잠깐 와봐 v2.3.3
 //@api 3.0
-//@version 2.3.2
+//@version 2.3.3
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -43,7 +43,7 @@
   const SETTING_ID = 'ad-plugin-setting';
   // v2.2.0 구간별 고정 제한(로어북 60,000자 · 장기기억 20,000자 · 변수 값 4,000자) 폐지 → 토큰 안전장치 하나로(기획자님 09-29)
   const FENCE = '```';
-  const AD_VERSION = '2.3.2';
+  const AD_VERSION = '2.3.3';
   // v2.3.0 AD 카드 연동(회의 기억) — 기획자님 09-30 확정(dev_notes 2.3.0 절):
   // 회의 응답마다 끝에 <meeting_memo> 한 줄(질문 요지 · 답 요지 · 마지막 말)을 받아 회의 목록 항목에 저장하고,
   // AD 카드의 본 모델 요청 때 모든 카드 · 모든 채팅을 통틀어 최근 N건을 <meeting_notes> 시스템 메시지로 끼운다. 카드 · 채팅에 쓰는 것 0.
@@ -4002,17 +4002,31 @@
     else inner = listHtml();
     // 같은 화면 재렌더 = 스크롤 유지 (innerHTML 교체가 위치를 날려 아코디언 조작마다 최상단 튐)
     // 로어북 화면의 스크롤 컨테이너는 .ghBody다 — .ghArcTab만 보면 매번 최상단으로 튄다
-    const scrollSel = (state.screen === 'lore') ? '.ghBody' : '.ghArcTab';
-    const keepScroll = (renderPrevScreen === state.screen && (state.screen === 'cue' || state.screen === 'arc' || state.screen === 'lore' || state.screen === 'hooks'))
-      ? (doc.querySelector(scrollSel) || {}).scrollTop : null;
-    renderPrevScreen = state.screen;
+    // v2.3.3: 설정 화면도 유지 대상에 넣음 — 빠져 있어서 청소 버튼 · 고급 설정 펼치기 때마다 맨 위로 튀고, 아래쪽 삭제 확인 화면이 화면 밖으로 밀렸다
+    // ★원칙(기획자님 10-06 「이거 카드 재렌더마냥 사용성문제라 짚고가야함」): 다시 그리기는 보던 자리를 옮기지 않는다.
+    //   화면 이름을 하나씩 적는 방식이 설정 화면을 빠뜨린 원인이라, 이제 **같은 화면이면 어떤 화면이든** 스크롤 상자(.ghBody 또는 .ghArcTab)의 위치를 유지한다.
+    //   새 화면을 만들어도 이 두 상자 중 하나를 쓰면 저절로 적용된다. 회의 화면만 예외 = 새 회의이거나, 메시지 수가 바뀌었거나, 맨 아래 근처에 있었으면 맨 아래로.
+    const scrollSel = doc.querySelector('.ghArcTab') ? '.ghArcTab' : '.ghBody';
+    const prevBox = doc.querySelector(scrollSel);
+    const viewKey = state.screen + (state.screen === 'chat' && state.thread ? ':' + state.thread.id : '');
+    const sameView = renderPrevScreen === viewKey;
+    const keepScroll = (sameView && prevBox) ? prevBox.scrollTop : null;
+    const prevNearBottom = prevBox ? (prevBox.scrollHeight - prevBox.scrollTop - prevBox.clientHeight < 60) : true;
+    const prevMsgCount = (state.screen === 'chat' && prevBox) ? prevBox.children.length : -1;
+    // 지금 글자를 넣고 있는 칸(포커스가 있는 입력 칸)은 다시 그린 뒤에도 값 · 포커스 · 커서 자리를 되돌린다.
+    // 설정에 들어간 직후 모듈 목록을 읽고 저절로 한 번 다시 그리는데, 그 사이에 치던 숫자 · 글이 날아가던 것을 막는다.
+    // 포커스가 없는 칸은 건드리지 않는다(「비우기」처럼 버튼이 값을 바꾸는 경우 옛 값을 되살리면 안 됨).
+    const act = doc.activeElement;
+    const typing = (sameView && act && act.id && (act.tagName === 'TEXTAREA' || (act.tagName === 'INPUT' && act.type !== 'checkbox' && act.type !== 'radio')))
+      ? { id: act.id, value: act.value, s: act.selectionStart, e: act.selectionEnd } : null;
+    renderPrevScreen = viewKey;
     doc.body.dataset.theme = state.settings.theme;
     doc.body.innerHTML = '<style>' + css() + '</style>'
       + '<div class="ghRoot" data-action="backdrop">'
       + '<div class="ghPanel">' + headerHtml() + (state.screen !== 'settings' ? tabsHtml() : '') + inner + '</div>'
       + '</div>';
     if (keepScroll != null) {
-      const tab = doc.querySelector(scrollSel);
+      const tab = doc.querySelector('.ghArcTab') || doc.querySelector('.ghBody');
       if (tab) tab.scrollTop = keepScroll;
     }
     // 항목을 펼쳤으면 그 항목을 본문 맨 위로 올린다 (기획자님 08-26)
@@ -4025,9 +4039,18 @@
     }
     if (state.screen === 'chat') {
       const box = doc.getElementById('ghMsgs');
-      if (box) box.scrollTop = box.scrollHeight;
+      // 읽으려고 위로 올려 둔 자리는 지킨다. 새 회의 · 새 메시지 · 원래 맨 아래에 있던 경우만 맨 아래로.
+      if (box && (!sameView || prevNearBottom || box.children.length !== prevMsgCount)) box.scrollTop = box.scrollHeight;
       const input = doc.getElementById('ghInput');
       if (input && state.draftInput) input.value = state.draftInput;
+    }
+    if (typing) {
+      const again = doc.getElementById(typing.id);
+      if (again) {
+        // 글 칸(회의 입력 · 아크 · 큐시트 · 로어북 · 추가 요청사항)은 입력할 때마다 state에 담기므로 그 값이 정본이다(전송 뒤 비우기 등). 값까지 되돌리는 것은 state에 담기지 않는 설정 숫자 칸과 제목 칸뿐.
+        if ((/^ghSet/.test(typing.id) && typing.id !== 'ghSetPersona') || typing.id === 'ghTitleInput') again.value = typing.value;
+        try { again.focus({ preventScroll: true }); if (typing.s != null) again.setSelectionRange(typing.s, typing.e); } catch (e) { /* 숫자 칸은 커서 자리를 받지 않는다 */ }
+      }
     }
   }
 
