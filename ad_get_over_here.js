@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.3.1
+//@display-name AD야 잠깐 와봐 v2.3.2
 //@api 3.0
-//@version 2.3.1
+//@version 2.3.2
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -43,7 +43,7 @@
   const SETTING_ID = 'ad-plugin-setting';
   // v2.2.0 구간별 고정 제한(로어북 60,000자 · 장기기억 20,000자 · 변수 값 4,000자) 폐지 → 토큰 안전장치 하나로(기획자님 09-29)
   const FENCE = '```';
-  const AD_VERSION = '2.3.1';
+  const AD_VERSION = '2.3.2';
   // v2.3.0 AD 카드 연동(회의 기억) — 기획자님 09-30 확정(dev_notes 2.3.0 절):
   // 회의 응답마다 끝에 <meeting_memo> 한 줄(질문 요지 · 답 요지 · 마지막 말)을 받아 회의 목록 항목에 저장하고,
   // AD 카드의 본 모델 요청 때 모든 카드 · 모든 채팅을 통틀어 최근 N건을 <meeting_notes> 시스템 메시지로 끼운다. 카드 · 채팅에 쓰는 것 0.
@@ -3843,6 +3843,8 @@
 
     let cleanup;
     if (state.confirmCleanup) {
+      // v2.3.2: 2.2.0에서 이 줄이 빠져 확인 화면을 그리다 오류 → 청소 버튼 네 개가 안 눌리던 것을 되돌림
+      const victims = cleanupVictims(state.confirmCleanup);
       cleanup = '<div class="ghConfirm"><strong>삭제 확인</strong>'
         + '<div>' + CLEANUP_LABELS[state.confirmCleanup] + ' ' + victims.length + '개를 지워요.</div>'
         + '<div style="font-size:12.5px;color:var(--ghSub)">같은 채팅의 큐시트·스토리 아크·미등장 떡밥·큐 옵션·토큰 집계도 함께 지워요.</div>'
