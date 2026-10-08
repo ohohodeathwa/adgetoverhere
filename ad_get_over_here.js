@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.3.3
+//@display-name AD야 잠깐 와봐 v2.3.4
 //@api 3.0
-//@version 2.3.3
+//@version 2.3.4
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -30,6 +30,10 @@
   const LORE_SNAP_PREFIX = 'ad_plugin:loresnap:'; // 로어북 저장 직전 원본 (되돌리기용)
   const HOOK_PREFIX = 'ad_plugin:hook:';       // v2.1.0 미등장 떡밥 목록 — 방마다 1건 {items, scannedAt, scanTurns}
   const ARCCHK_PREFIX = 'ad_plugin:arcchk:';   // v2.1.0 스토리 아크 점검 결과 — 방마다 최신 1건 {text, ts}
+  // 저장소 설정(기획자님 10-08): 평소 저장은 기기 저장소 그대로. 아래 두 키만 플러그인 저장소(리스 세이브 파일에 실리는 쪽)에 쓴다.
+  // 묶음 안의 항목 키는 기기 저장소 키(`ad_plugin:*`)를 그대로 쓴다 — 옮길 때 이름을 바꾸는 단계가 없어야 옛 판 데이터가 그대로 이어진다.
+  const BUNDLE_KEY = 'ad_plugin:bundle:v1';            // { v, ts, items: { <기기 저장소 키>: 값 } }
+  const BUNDLE_META_KEY = 'ad_plugin:bundle_meta:v1';  // { ts, count, bytes, ver } — 설정 화면에 묶음 전체를 읽지 않고 보여 주려고 따로 둔다
   const HOOK_MAX = 20;                         // 한 번 스캔에서 받는 떡밥 상한
   const LORE_SNAP_KEEP = 10;      // 방마다 보관할 되돌리기 지점 수
   const GEN_STALE_MS = 180000;    // 생성 종료 신호를 놓쳤을 때 잠금이 영구히 걸리지 않게 하는 한도
@@ -43,7 +47,7 @@
   const SETTING_ID = 'ad-plugin-setting';
   // v2.2.0 구간별 고정 제한(로어북 60,000자 · 장기기억 20,000자 · 변수 값 4,000자) 폐지 → 토큰 안전장치 하나로(기획자님 09-29)
   const FENCE = '```';
-  const AD_VERSION = '2.3.3';
+  const AD_VERSION = '2.3.4';
   // v2.3.0 AD 카드 연동(회의 기억) — 기획자님 09-30 확정(dev_notes 2.3.0 절):
   // 회의 응답마다 끝에 <meeting_memo> 한 줄(질문 요지 · 답 요지 · 마지막 말)을 받아 회의 목록 항목에 저장하고,
   // AD 카드의 본 모델 요청 때 모든 카드 · 모든 채팅을 통틀어 최근 N건을 <meeting_notes> 시스템 메시지로 끼운다. 카드 · 채팅에 쓰는 것 0.
@@ -303,6 +307,10 @@
     sending: false,
     sendSeq: 0,
     confirmCleanup: null, // null | 'card' | 'all'
+    bundleInfo: undefined, // 플러그인 저장소의 사본 — undefined = 아직 확인 전 / null = 없음 / { ts, count, bytes }
+    bundleAsk: null,       // 저장소 설정의 확인 화면 — null | { kind: 'save' | 'load' | 'delete' | 'after-load', … }
+    bundleBusy: false,
+    bundleErr: '',
     deleteTargetId: null,
     toastTimer: null,
     uiButton: null,
@@ -3372,7 +3380,7 @@
     const body = state.miniTab === 'input' ? miniInputHtml() : miniAdviceHtml();
     return '<div class="ghMiniWrap ghDragTarget' + (state.miniNarrow ? ' ghNarrow' : '') + (state.drag ? ' ghDragging' : '')
       + (state.miniAnchor === 'top' ? ' ghAnchorTop' : '')
-      + '" id="ghMiniWrap" style="width:' + (state.miniW || MINI_W) + 'px;max-height:' + (state.miniMaxH || MINI_H) + 'px;">'
+      + '" id="ghMiniWrap" style="width:' + (state.miniW || MINI_W) + 'px;max-height:' + (state.miniMaxH || MINI_H) + 'px;">' // ★여기에 100vh(창 높이)를 묶지 말 것(10-08 실기): 창 높이는 이 본체를 재서 정하므로, 본체가 창 높이를 따르면 한 번 줄어든 뒤 다시 자라지 못한다
       + miniMenuHtml()
       + '<div class="ghMBody">' + body + '</div>'
       + miniNotiHtml()
@@ -3453,7 +3461,8 @@
     if (state.arcBusy) statusText = 'AD 작성 중…';
     else if (state.arcMode === 'edit') statusText = '편집 중. 저장해야 반영돼요';
     else if (state.arcMode === 'adapt') statusText = '각색 중';
-    else statusText = has ? 'AD가 모든 답변에서 참고해요' : '비어 있음';
+    // 10-08 사용자 문의: 「모든 답변」이 채팅 모델의 답변으로 읽혀, 아크를 써 두면 채팅이 그 흐름으로 간다고 이해함 → 누가 읽는지를 적는다
+    else statusText = has ? 'AD가 답할 때 참고해요 · 채팅 모델에는 전달되지 않아요' : '비어 있음';
     const status = '<div class="ghArcStatus">이 채팅 전용 · ' + statusText + '</div>';
 
     // v2.1.0 점검 결과 — 아크 아래 접히는 상자. 최신 1건만 남긴다.
@@ -3866,6 +3875,61 @@
         + '</div>';
     }
 
+    // 저장소 설정(기획자님 10-08) — 데이터 청소 위. 확인 화면은 청소와 같은 상자(.ghConfirm)를 쓴다.
+    const bi = state.bundleInfo;
+    const ba = state.bundleAsk;
+    const sub = (t) => '<div style="font-size:12.5px;color:var(--ghSub);line-height:1.8">' + t + '</div>';
+    let bundle;
+    if (ba && ba.kind === 'save') {
+      bundle = '<div class="ghConfirm"><strong>저장 확인</strong>'
+        + '<div>기기 저장소의 AD 기록 ' + ba.count + '개 항목(약 ' + fmtBytes(ba.bytes) + ')을 플러그인 저장소에 저장해요.</div>'
+        + sub('리스 세이브 파일이 그만큼 커져요.' + (bi ? ' 전에 저장해 둔 사본(' + esc(fmtWhen(bi.ts)) + ')은 이번 것으로 바뀌어요.' : ''))
+        + '<div class="ghRow"><button class="ghHBtn ghAccent" data-action="bundle-run" data-mode="save">저장하기</button>'
+        + '<button class="ghHBtn" data-action="bundle-cancel">취소</button></div></div>';
+    } else if (ba && ba.kind === 'load') {
+      const cf = ba.plan.conflicts;
+      bundle = '<div class="ghConfirm"><strong>가져오기 확인</strong>'
+        + '<div>기기 저장소에 이미 있는 내용과 겹치는 곳이 ' + cf.length + '곳 있어요. 덮어쓸까요?</div>'
+        + sub(cf.slice(0, 12).map((c) => '· ' + esc(c.label) + ' — ' + esc(c.parts.join(' · '))
+          + ((c.localAt || c.remoteAt) ? '<br>&nbsp;&nbsp;기기 회의 마지막 수정 ' + esc(fmtWhen(c.localAt)) + ' / 가져올 회의 마지막 수정 ' + esc(fmtWhen(c.remoteAt)) : '')).join('<br>')
+          + (cf.length > 12 ? '<br>… 외 ' + (cf.length - 12) + '곳' : ''))
+        + sub('가져올 것 전체 ' + ba.plan.total + '개 항목 · 기기에 없는 것 ' + ba.plan.fresh + '개 · 내용이 같은 것 ' + ba.plan.same + '개 · 저장한 때 ' + esc(fmtWhen(ba.ts)))
+        + sub('덮어쓰면 겹치는 항목이 가져온 것으로 바뀌고, 되돌릴 수 없어요.')
+        + '<div class="ghRow"><button class="ghHBtn ghDanger" data-action="bundle-run" data-mode="overwrite">덮어쓰기</button>'
+        + '<button class="ghHBtn" data-action="bundle-run" data-mode="skip">겹치는 곳은 제외하고 가져오기</button>'
+        + '<button class="ghHBtn" data-action="bundle-cancel">취소</button></div></div>';
+    } else if (ba && ba.kind === 'delete') {
+      bundle = '<div class="ghConfirm"><strong>삭제 확인</strong>'
+        + '<div>플러그인 저장소에 저장해 둔 사본' + (bi ? ' ' + bi.count + '개 항목(약 ' + fmtBytes(bi.bytes) + ')' : '') + '을 지워요.</div>'
+        + sub('기기 저장소의 기록은 지우지 않아요. 지운 사본은 되돌릴 수 없어요.')
+        + '<div class="ghRow"><button class="ghHBtn ghDanger" data-action="bundle-run" data-mode="delete">삭제하기</button>'
+        + '<button class="ghHBtn" data-action="bundle-cancel">취소</button></div></div>';
+    } else if (ba && ba.kind === 'after-load') {
+      bundle = '<div class="ghConfirm"><strong>가져오기 완료</strong>'
+        + '<div>기기 저장소로 ' + ba.wrote + '개 항목을 가져왔어요.' + (ba.skipped ? ' 겹쳐서 제외한 것은 ' + ba.skipped + '개예요.' : '') + '</div>'
+        + '<div>플러그인 저장소에 남아 있는 사본을 지울까요?</div>'
+        + sub('남겨 두면 리스 세이브 파일에 계속 실려요. 기기 저장소로 가져온 기록은 지우지 않아요.')
+        + '<div class="ghRow"><button class="ghHBtn ghDanger" data-action="bundle-run" data-mode="delete">지우기</button>'
+        + '<button class="ghHBtn" data-action="bundle-cancel">남겨 두기</button></div></div>';
+    } else {
+      bundle = '<div class="ghSetNote">AD의 기록은 이 기기에만 저장돼요. 플러그인 저장소에 넣어 두면 리스 백업 파일과 계정 동기화에 함께 실려요.</div>'
+        + '<ul class="ghSetList">'
+        + '<li>저장하기: 기기 저장소의 내용을 플러그인 저장소에 저장해요.</li>'
+        + '<li>가져오기: 플러그인 저장소의 내용을 기기 저장소로 불러와요. 겹치는 채팅이 있으면 목록을 보여 주고 덮어쓸지 물어요.</li>'
+        + '<li>삭제하기: 플러그인 저장소의 내용을 지워요. 기기 저장소의 기록은 그대로예요.</li>'
+        + '</ul>'
+        + '<div class="ghSetNote">플러그인 저장소의 사본: '
+        + (state.bundleErr ? esc(state.bundleErr)
+          : (bi === undefined ? '확인하는 중이에요.'
+            : (bi ? bi.count + '개 항목 · 약 ' + fmtBytes(bi.bytes) + ' · 저장한 때 ' + esc(fmtWhen(bi.ts)) : '없음')))
+        + '</div>'
+        + '<div class="ghRow">'
+        + '<button class="ghHBtn" data-action="bundle-ask" data-kind="save">저장하기</button>'
+        + '<button class="ghHBtn" data-action="bundle-ask" data-kind="load">가져오기</button>'
+        + '<button class="ghHBtn ghDanger" data-action="bundle-ask" data-kind="delete">삭제하기</button>'
+        + '</div>';
+    }
+
     // v2.2.0 모듈 참조 설정 — 체크 = AD가 그 모듈 로어북을 읽음(기본) · 변경 즉시 저장
     const mods = state.activeModules;
     const off = s.moduleOff || {};
@@ -3931,6 +3995,8 @@
       + '<li>고른 상태는 모듈마다 기억돼요. 전역 · 카드 · 채팅 어디서 켜도 같아요.</li>'
       + '</ul>'
       + modRows + '</div>'
+      + '<div class="ghSetHead">플러그인 저장소에 넣어두기</div>'
+      + '<div class="ghSetBlock">' + bundle + '</div>'
       + '<div class="ghSetHead">데이터 청소</div>'
       + '<div class="ghSetBlock">' + cleanup + '</div>'
       + '<div class="ghSetBlock ghDim ghSetVer">AD야 잠깐 와봐 · v' + AD_VERSION + '</div>'
@@ -4111,10 +4177,13 @@
     state.arcAdaptNote = '';
     state.arcDeleteAsk = false;
 
+    state.bundleAsk = null;
     if (screen === 'settings') {
       state.screen = 'settings';
       state.activeModules = null;
       refreshModuleList().then(() => { if (state.screen === 'settings') render(); });
+      state.bundleInfo = undefined;
+      refreshBundleInfo().then(() => { if (state.screen === 'settings') render(); });
     } else {
       // 기본 = 편집회의 탭, 최근 회의로 바로 진입 (없으면 목록)
       const recent = threadsOfRoom()[0];
@@ -4483,6 +4552,263 @@
   }
 
   // ==========================================================================
+  // 저장소 설정 — 기기 저장소 ↔ 플러그인 저장소 (기획자님 10-08)
+  // ==========================================================================
+  // 제보: 로컬 리스의 백업을 웹 리스에서 불러오면 AD 기록이 안 보임. 원인 = AD는 기기 저장소(getLocalPluginStorage)에만 쓰고,
+  // 그 저장소는 리스 세이브 파일에 실리지 않는다. 평소 저장을 플러그인 저장소로 옮기면 세이브 파일이 대책 없이 불어나므로
+  // (처음부터 피한 것 · dev_notes 「세이브 파일 비오염」) 옮길 때만 사본을 싣고, 다 옮기면 지운다.
+  // 플러그인 저장소는 모든 플러그인이 같이 쓰는 공간 → 우리 키 두 개(BUNDLE_KEY · BUNDLE_META_KEY)만 넣고 지운다. clear()는 부르지 않는다.
+
+  const BUNDLE_SETTINGS_ROOM = '__settings';
+  const BUNDLE_PARTS = [
+    [THREAD_PREFIX, '회의'], [ARC_PREFIX, '스토리 아크'], [CUE_PREFIX, '큐시트'], [CUEOPT_PREFIX, '큐 옵션'],
+    [HOOK_PREFIX, '미등장 떡밥'], [ARCCHK_PREFIX, '아크 점검'], [AID_PREFIX, 'AD 의견 · 인풋 도우미'],
+    [LORE_SNAP_PREFIX, '로어북 되돌리기 지점'], [TOK_PREFIX, '토큰 집계'],
+  ];
+
+  function bundleStore() {
+    const ps = api && api.pluginStorage;
+    if (!ps || typeof ps.setItem !== 'function' || typeof ps.getItem !== 'function' || typeof ps.removeItem !== 'function') {
+      throw new Error('이 리스 버전에서 플러그인 저장소(pluginStorage)를 찾지 못했어요.');
+    }
+    return ps;
+  }
+
+  function bundleKeyPart(key) {
+    if (key === SETTINGS_KEY) return '플러그인 설정';
+    for (const p of BUNDLE_PARTS) if (key.indexOf(p[0]) === 0) return p[1];
+    return '기타';
+  }
+
+  // 항목이 어느 채팅(room)의 것인가. 회의는 본문에 room이 있고, 나머지는 키 꼬리가 room이다.
+  function bundleKeyRoom(key, val) {
+    if (key === SETTINGS_KEY) return BUNDLE_SETTINGS_ROOM;
+    if (key.indexOf(THREAD_PREFIX) === 0) return (val && val.room) || '';
+    for (const p of BUNDLE_PARTS) if (key.indexOf(p[0]) === 0) return key.slice(p[0].length);
+    return '';
+  }
+
+  function byteLen(text) {
+    try { return new Blob([text]).size; } catch (e) { return text.length; }
+  }
+
+  function fmtBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(1) + ' MB';
+  }
+
+  function fmtWhen(ts) {
+    return ts ? new Date(ts).toLocaleString() : '시각 기록 없음';
+  }
+
+  // 기기 저장소에서 우리 것만 모은다(이 저장소도 플러그인끼리 같이 쓴다).
+  async function collectDeviceItems() {
+    const items = {};
+    const keys = await state.storage.keys();
+    for (const k of keys) {
+      if (k.indexOf('ad_plugin:') !== 0 || k === BUNDLE_KEY || k === BUNDLE_META_KEY) continue;
+      const v = await state.storage.getItem(k);
+      if (v != null) items[k] = v;
+    }
+    return items;
+  }
+
+  async function refreshBundleInfo() {
+    try {
+      const m = await bundleStore().getItem(BUNDLE_META_KEY);
+      state.bundleInfo = (m && typeof m === 'object') ? { ts: m.ts || 0, count: m.count | 0, bytes: m.bytes | 0 } : null;
+      state.bundleErr = '';
+    } catch (e) {
+      state.bundleInfo = null;
+      state.bundleErr = String((e && e.message) || e);
+    }
+  }
+
+  // 가져올 묶음과 기기 저장소를 대조한다. 겹침 = 같은 키가 기기에도 있고 내용이 다름.
+  // 회의 목록(INDEX_KEY)은 항목이 아니라 합쳐서 다시 쓰는 것이라 대조에서 뺀다.
+  async function bundlePlan(items) {
+    const remoteIdx = Array.isArray(items[INDEX_KEY]) ? items[INDEX_KEY] : [];
+    const localIdx = (await state.storage.getItem(INDEX_KEY)) || [];
+    const rooms = new Map(); // room → { parts: Map(이름 → 개수) }
+    let fresh = 0, same = 0;
+    for (const k of Object.keys(items)) {
+      if (k === INDEX_KEY) continue;
+      const local = await state.storage.getItem(k);
+      if (local == null) { fresh++; continue; }
+      if (JSON.stringify(local) === JSON.stringify(items[k])) { same++; continue; }
+      const room = bundleKeyRoom(k, items[k]);
+      if (!rooms.has(room)) rooms.set(room, new Map());
+      const parts = rooms.get(room);
+      const name = bundleKeyPart(k);
+      parts.set(name, (parts.get(name) || 0) + 1);
+    }
+    const last = (idx, room) => idx.filter((t) => t.room === room).reduce((a, t) => Math.max(a, t.updatedAt || 0), 0);
+    const conflicts = Array.from(rooms.entries()).map(([room, parts]) => {
+      const meta = remoteIdx.find((t) => t.room === room) || localIdx.find((t) => t.room === room);
+      // 이름은 회의 목록에서 찾는다. 회의가 한 번도 없던 채팅은 목록에 없으므로(10-08 기획자님 실기: 방 키가 날것으로 보임)
+      // 지금 열린 채팅이면 그 이름을 쓰고, 그것도 아니면 이름을 알 수 없다고 적는다. 방 키(고유 번호)는 화면에 내지 않는다.
+      const env = state.env;
+      const label = room === BUNDLE_SETTINGS_ROOM ? '플러그인 설정'
+        : (meta ? (meta.charName || '카드?') + ' > ' + (meta.chatName || '채팅?')
+          : ((env && env.room === room) ? env.charName + ' > ' + env.chatName
+            : '이름을 알 수 없는 채팅(회의 기록이 없는 채팅)'));
+      return {
+        room,
+        label,
+        parts: Array.from(parts.entries()).map(([name, n]) => (name === '회의' ? '회의 ' + n + '개' : name)),
+        localAt: room === BUNDLE_SETTINGS_ROOM ? 0 : last(localIdx, room),
+        remoteAt: room === BUNDLE_SETTINGS_ROOM ? 0 : last(remoteIdx, room),
+      };
+    });
+    return { total: Object.keys(items).filter((k) => k !== INDEX_KEY).length, fresh, same, conflicts };
+  }
+
+  async function askBundle(kind) {
+    if (state.bundleBusy) return;
+    state.bundleBusy = true;
+    state.confirmCleanup = null;
+    let note = '';
+    let handedOver = false;
+    try {
+      const ps = bundleStore();
+      if (kind === 'save') {
+        const items = await collectDeviceItems();
+        const count = Object.keys(items).length;
+        if (!count) { note = ('기기 저장소에 저장된 AD 기록이 없어요.'); return; }
+        state.bundleAsk = { kind: 'save', count, bytes: byteLen(JSON.stringify(items)) };
+      } else if (kind === 'delete') {
+        await refreshBundleInfo();
+        if (!state.bundleInfo) { note = ('플러그인 저장소에 저장된 내용이 없어요.'); return; }
+        state.bundleAsk = { kind: 'delete' };
+      } else if (kind === 'load') {
+        const b = await ps.getItem(BUNDLE_KEY);
+        if (!b || !b.items || !Object.keys(b.items).length) { note = ('플러그인 저장소에 저장된 내용이 없어요.'); return; }
+        const plan = await bundlePlan(b.items);
+        // 겹치는 곳이 없으면 묻지 않고 가져온다. 그리기와 알림은 runBundleLoad가 맡는다(여기서 다시 그리면 그 알림이 지워진다).
+        if (!plan.conflicts.length) { handedOver = true; state.bundleBusy = false; await runBundleLoad('overwrite'); return; }
+        state.bundleAsk = { kind: 'load', plan, ts: b.ts || 0 };
+      }
+    } catch (e) {
+      note = ('플러그인 저장소 오류: ' + String((e && e.message) || e));
+    } finally {
+      if (!handedOver) {
+        state.bundleBusy = false;
+        render();
+        if (note) toast(note); // 알림은 다시 그린 뒤에 — render()가 화면을 통째로 갈아 끼워 먼저 띄운 알림이 지워진다
+      }
+    }
+  }
+
+  async function runBundleSave() {
+    if (state.bundleBusy) return;
+    state.bundleBusy = true;
+    let note = '';
+    try {
+      const ps = bundleStore();
+      const items = await collectDeviceItems();
+      const count = Object.keys(items).length;
+      const ts = Date.now();
+      const bytes = byteLen(JSON.stringify(items));
+      await ps.setItem(BUNDLE_KEY, { v: 1, ts, items });
+      await ps.setItem(BUNDLE_META_KEY, { ts, count, bytes, ver: AD_VERSION });
+      // 넣은 뒤 다시 읽어 항목 수를 대조한다 — 넣었다고만 하고 실제로는 비어 있는 일을 막는다
+      const back = await ps.getItem(BUNDLE_KEY);
+      const got = (back && back.items) ? Object.keys(back.items).length : 0;
+      if (got !== count) throw new Error('저장한 뒤 다시 읽으니 항목 수가 달라요(넣은 것 ' + count + '개 · 읽힌 것 ' + got + '개).');
+      state.bundleInfo = { ts, count, bytes };
+      state.bundleAsk = null;
+      note = ('플러그인 저장소에 ' + count + '개 항목(약 ' + fmtBytes(bytes) + ')을 저장했어요');
+    } catch (e) {
+      note = ('저장하지 못했어요: ' + String((e && e.message) || e));
+    } finally {
+      state.bundleBusy = false;
+      render();
+      if (note) toast(note); // 알림은 다시 그린 뒤에 — render()가 화면을 통째로 갈아 끼워 먼저 띄운 알림이 지워진다
+    }
+  }
+
+  // mode = 'overwrite'(겹치는 채팅도 가져온 것으로 바꿈) | 'skip'(겹치는 채팅은 기기 것을 그대로 두고 나머지만)
+  async function runBundleLoad(mode) {
+    if (state.bundleBusy) return;
+    state.bundleBusy = true;
+    let note = '';
+    try {
+      const ps = bundleStore();
+      const b = await ps.getItem(BUNDLE_KEY);
+      if (!b || !b.items) throw new Error('플러그인 저장소에 저장된 내용이 없어요.');
+      const plan = await bundlePlan(b.items);
+      const skipRooms = new Set(mode === 'skip' ? plan.conflicts.map((c) => c.room) : []);
+      let wrote = 0, skipped = 0;
+      for (const k of Object.keys(b.items)) {
+        if (k === INDEX_KEY) continue;
+        if (skipRooms.has(bundleKeyRoom(k, b.items[k]))) { skipped++; continue; }
+        await state.storage.setItem(k, b.items[k]);
+        wrote++;
+      }
+      // 회의 목록은 통째로 바꾸지 않고 합친다 — 기기에만 있는 회의가 목록에서 사라지지 않게
+      const remoteIdx = Array.isArray(b.items[INDEX_KEY]) ? b.items[INDEX_KEY] : [];
+      const merged = new Map(((await state.storage.getItem(INDEX_KEY)) || []).map((t) => [t.id, t]));
+      for (const t of remoteIdx) {
+        if (!t || !t.id || skipRooms.has(t.room)) continue;
+        if (!b.items[THREAD_PREFIX + t.id]) continue; // 본문 없는 목록 줄은 들이지 않는다
+        merged.set(t.id, t);
+      }
+      await state.storage.setItem(INDEX_KEY, Array.from(merged.values()));
+
+      // 화면이 들고 있던 값을 방금 가져온 것으로 갈아 끼운다
+      await loadSettings();
+      await loadIndex();
+      const env = state.env;
+      if (env) {
+        state.arc = await loadArc(env.room);
+        state.arcMode = (state.arc && state.arc.trim()) ? 'view' : 'create';
+        state.cues = await loadCues(env.room);
+        state.cueOpts = await loadCueOpts(env.room);
+        state.roomTok = await loadRoomTok(env.room);
+        const h = await loadHooks(env.room);
+        state.hooks = h.items;
+        state.hookMeta = h.meta;
+        state.arcCheck = await loadArcCheck(env.room);
+      }
+      if (state.thread) state.thread = (await loadThread(state.thread.id)) || null;
+      state.aidRoom = null;
+      state.loreSnaps = [];
+      // 남겨 두는 일 방지(기획자님 10-08): 가져오기가 끝나면 그 자리에서 플러그인 저장소의 사본을 지울지 묻는다
+      state.bundleAsk = { kind: 'after-load', wrote, skipped };
+      note = ('기기 저장소로 ' + wrote + '개 항목을 가져왔어요' + (skipped ? ' · 겹쳐서 제외한 것 ' + skipped + '개' : ''));
+    } catch (e) {
+      note = ('가져오지 못했어요: ' + String((e && e.message) || e));
+    } finally {
+      state.bundleBusy = false;
+      render();
+      if (note) toast(note); // 알림은 다시 그린 뒤에 — render()가 화면을 통째로 갈아 끼워 먼저 띄운 알림이 지워진다
+    }
+  }
+
+  async function runBundleDelete() {
+    if (state.bundleBusy) return;
+    state.bundleBusy = true;
+    let note = '';
+    try {
+      const ps = bundleStore();
+      await ps.removeItem(BUNDLE_KEY);
+      await ps.removeItem(BUNDLE_META_KEY);
+      const back = await ps.getItem(BUNDLE_KEY);
+      if (back) throw new Error('지운 뒤 다시 읽으니 내용이 남아 있어요.');
+      state.bundleInfo = null;
+      state.bundleAsk = null;
+      note = ('플러그인 저장소의 사본을 지웠어요. 기기 저장소의 기록은 그대로예요');
+    } catch (e) {
+      note = ('지우지 못했어요: ' + String((e && e.message) || e));
+    } finally {
+      state.bundleBusy = false;
+      render();
+      if (note) toast(note); // 알림은 다시 그린 뒤에 — render()가 화면을 통째로 갈아 끼워 먼저 띄운 알림이 지워진다
+    }
+  }
+
+  // ==========================================================================
   // 이벤트 (위임)
   // ==========================================================================
 
@@ -4524,6 +4850,9 @@
         // v2.1.0 깜빡임(기획자님 09-25): 전에는 「창 키움 → 그림 → 창 줄임」이라 창이 커진 한 프레임 동안 옛 내용이
         // 아래로 내려앉았다가 새 내용으로 바뀌었고, render()가 예약한 크기 맞춤이 한 번 더 겹쳐 돌았다.
         // 새 내용을 위 고정으로 먼저 그리면(메뉴바 제자리) 창 크기는 투명 영역만 바뀐다. 크기 맞춤은 한 번만.
+        // 10-08 제보(아래 버튼까지 스크롤이 안 됨): 본체의 최대 높이는 탭마다 다르다(인풋 도우미 566 · AD 의견 470).
+        // 직전 탭의 값으로 그리면 본체가 창보다 길어져 아래가 잘린다 → 그리기 전에 새 탭의 값으로 맞춘다.
+        try { state.miniMaxH = (await miniSize()).maxH; } catch (e) { /* 못 재면 applyGeom이 뒤에서 맞춘다 */ }
         render();
         clearTimeout(miniResizeTimer);
         await applyGeom('mini');
@@ -4674,12 +5003,15 @@
             state.screen = 'settings';
             state.activeModules = null;
             refreshModuleList().then(() => { if (state.screen === 'settings') render(); });
+            state.bundleInfo = undefined;
+            refreshBundleInfo().then(() => { if (state.screen === 'settings') render(); });
           } else if (!state.env) {
             break; // 돌아갈 화면 없음 — 닫기는 ✕/백드롭으로
           } else {
             state.screen = state.thread ? 'chat' : 'list';
           }
           state.confirmCleanup = null;
+          state.bundleAsk = null;
           render();
           break;
         case 'new-thread': await newThread(); break;
@@ -5021,8 +5353,21 @@
         }
         case 'ask-cleanup':
           state.confirmCleanup = el.dataset.scope;
+          state.bundleAsk = null;
           render();
           break;
+        case 'bundle-ask': await askBundle(el.dataset.kind); break;
+        case 'bundle-cancel':
+          state.bundleAsk = null;
+          render();
+          break;
+        case 'bundle-run': {
+          const mode = el.dataset.mode;
+          if (mode === 'save') await runBundleSave();
+          else if (mode === 'delete') await runBundleDelete();
+          else await runBundleLoad(mode === 'skip' ? 'skip' : 'overwrite');
+          break;
+        }
         case 'cancel-cleanup':
           state.confirmCleanup = null;
           render();
