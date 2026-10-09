@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.3.4
+//@display-name AD야 잠깐 와봐 v2.3.5
 //@api 3.0
-//@version 2.3.4
+//@version 2.3.5
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -47,7 +47,7 @@
   const SETTING_ID = 'ad-plugin-setting';
   // v2.2.0 구간별 고정 제한(로어북 60,000자 · 장기기억 20,000자 · 변수 값 4,000자) 폐지 → 토큰 안전장치 하나로(기획자님 09-29)
   const FENCE = '```';
-  const AD_VERSION = '2.3.4';
+  const AD_VERSION = '2.3.5';
   // v2.3.0 AD 카드 연동(회의 기억) — 기획자님 09-30 확정(dev_notes 2.3.0 절):
   // 회의 응답마다 끝에 <meeting_memo> 한 줄(질문 요지 · 답 요지 · 마지막 말)을 받아 회의 목록 항목에 저장하고,
   // AD 카드의 본 모델 요청 때 모든 카드 · 모든 채팅을 통틀어 최근 N건을 <meeting_notes> 시스템 메시지로 끼운다. 카드 · 채팅에 쓰는 것 0.
@@ -302,6 +302,7 @@
     cueDraft: '',
     cueNote: '',
     cueDeleteAsk: null,
+    cueBulkAsk: null,     // 큐시트 아래 줄의 묶음 삭제 확인 — null | 'checked'(체크한 큐) | 'all'(전체) · v2.3.5
     roomTok: { tin: 0, tout: 0 },
     lastCtxBrk: null,
     sending: false,
@@ -3054,6 +3055,11 @@
     /* v2.1.0: 아크 행이 버튼 5개(md 파일로 저장·삭제·점검·각색·편집)라 375px에서 넘친다 → 줄바꿈 허용 */
     .ghRow { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
     .ghDanger { color: #c0564e; }
+    .ghHBtn:disabled { opacity: .45; cursor: default; }
+    .ghCueFoot { margin-top: 10px; justify-content: space-between; align-items: center; }
+    .ghCueFootGrp { display: inline-flex; gap: 8px; flex-wrap: wrap; }
+    .ghCueFootMsg { font-size: 13px; }
+    .ghCueFootAsk { justify-content: flex-start; gap: 12px; }
     .ghConfirm { border: 1px solid #c0564e55; border-radius: 12px; padding: 14px; background: var(--ghCard); font-size: 13.5px; display: flex; flex-direction: column; gap: 10px; }
 
     .ghToast { position: absolute; bottom: 26px; left: 50%; transform: translateX(-50%); background: #2b2a28; color: #fff; border-radius: 999px; padding: 9px 18px; font-size: 13px; opacity: .95; z-index: 10; }
@@ -3546,6 +3552,26 @@
       + '</div>';
   }
 
+  // 큐시트 아래 줄(v2.3.5 · 기획자님 10-09): 왼쪽 = 선택 삭제 · 전체 삭제 / 오른쪽 = 직접 추가 · 이어서 생성하기.
+  // 「선택」 = 큐 왼쪽의 체크(이미 보낸 큐 표시)를 그대로 쓴다. 체크한 큐가 없으면 선택 삭제는 눌리지 않는다.
+  function cueFootHtml(items) {
+    const checked = items.filter((c) => c.done || c.sentAt).length;
+    const ask = state.cueBulkAsk;
+    if (ask === 'checked' || ask === 'all') {
+      const n = ask === 'all' ? items.length : checked;
+      // 확인 버튼은 삭제 버튼이 있던 왼쪽에 둔다(기획자님 10-09): 오른쪽에 두면 「취소」 자리가 「이어서 생성하기」와 겹쳐, 두 번 눌렸을 때 모델 호출이 나간다.
+      // 왼쪽이면 두 번 눌려도 닿는 것은 삭제 버튼(= 확인 줄이 다시 열릴 뿐)이다.
+      return '<div class="ghRow ghCueFoot ghCueFootAsk"><span class="ghCueFootGrp"><button class="ghHBtn ghDanger" data-action="cue-bulk-confirm">삭제 확정</button>'
+        + '<button class="ghHBtn" data-action="cue-bulk-cancel">취소</button></span>'
+        + '<span class="ghCueFootMsg">' + (ask === 'all' ? '이 채팅의 큐 ' + n + '개를 전부 지울까요?' : '체크한 큐 ' + n + '개를 지울까요?') + ' 되돌릴 수 없어요.</span></div>';
+    }
+    return '<div class="ghRow ghCueFoot"><span class="ghCueFootGrp">'
+      + '<button class="ghHBtn ghDanger" data-action="cue-bulk-ask" data-kind="checked"' + (checked ? '' : ' disabled') + ' title="' + (checked ? '체크한 큐 ' + checked + '개를 지워요' : '지울 큐를 먼저 체크해 주세요') + '">선택 삭제</button>'
+      + '<button class="ghHBtn ghDanger" data-action="cue-bulk-ask" data-kind="all">전체 삭제</button></span>'
+      + '<span class="ghCueFootGrp"><button class="ghHBtn" data-action="cue-add">+ 직접 추가</button>'
+      + '<button class="ghHBtn" data-action="cue-generate-more">이어서 생성하기</button></span></div>';
+  }
+
   function cueTabHtml() {
     const items = state.cues || [];
     const status = '<div class="ghArcStatus">이 채팅 전용 · '
@@ -3590,8 +3616,7 @@
         }
         return '<div class="ghCueItem' + (open ? ' ghCueOpen' : '') + '">' + inner + '</div>';
       }).join('') + '</div>'
-        + '<div class="ghRow" style="margin-top:10px;justify-content:flex-start"><button class="ghHBtn" data-action="cue-add">+ 직접 추가</button>'
-        + '<button class="ghHBtn" data-action="cue-generate-more">이어서 생성하기</button></div>';
+        + cueFootHtml(items);
     }
     return '<div class="ghArcTab">' + status + body + '</div>';
   }
@@ -4166,6 +4191,7 @@
     state.cueDraft = '';
     state.cueNote = '';
     state.cueDeleteAsk = null;
+    state.cueBulkAsk = null;
     await loadIndex();
     state.thread = null;
     state.confirmCleanup = null;
@@ -5057,6 +5083,7 @@
           const item = state.cues.find((c) => c.id === el.dataset.id);
           if (item) {
             item.done = !!el.checked;
+            state.cueBulkAsk = null; // 체크가 바뀌면 묶음 삭제 확인을 닫는다(지울 개수가 달라짐)
             if (!el.checked) delete item.sentAt; // 체크 해제 = 소화 취소 (전송 기록도 함께 철회)
             await saveCues(state.env.room, state.cues);
             render();
@@ -5127,6 +5154,24 @@
           break;
         }
         case 'cue-adapt': await runCueLLM('adapt', (state.cueNote || '').trim(), el.dataset.id); break;
+        case 'cue-bulk-ask': {
+          const kind = el.dataset.kind === 'all' ? 'all' : 'checked';
+          if (kind === 'checked' && !state.cues.some((c) => c.done || c.sentAt)) break; // 체크한 큐가 없으면 아무 일도 없음
+          state.cueBulkAsk = kind; state.cueDeleteAsk = null; render(); break;
+        }
+        case 'cue-bulk-cancel': state.cueBulkAsk = null; render(); break;
+        case 'cue-bulk-confirm': {
+          const kind = state.cueBulkAsk;
+          if (kind !== 'all' && kind !== 'checked') break;
+          const before = state.cues.length;
+          state.cues = kind === 'all' ? [] : state.cues.filter((c) => !(c.done || c.sentAt));
+          await saveCues(state.env.room, state.cues);
+          state.cueBulkAsk = null; state.cueDeleteAsk = null;
+          if (state.cueOpenId && !state.cues.some((c) => c.id === state.cueOpenId)) { state.cueOpenId = null; state.cueDraft = ''; state.cueNote = ''; }
+          render();
+          toast('큐 ' + (before - state.cues.length) + '개를 지웠어요');
+          break;
+        }
         case 'cue-delete': state.cueDeleteAsk = el.dataset.id; render(); break;
         case 'cue-delete-cancel': state.cueDeleteAsk = null; render(); break;
         case 'cue-delete-confirm': {
