@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v2.3.5
+//@display-name AD야 잠깐 와봐 v2.3.6
 //@api 3.0
-//@version 2.3.5
+//@version 2.3.6
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -47,7 +47,7 @@
   const SETTING_ID = 'ad-plugin-setting';
   // v2.2.0 구간별 고정 제한(로어북 60,000자 · 장기기억 20,000자 · 변수 값 4,000자) 폐지 → 토큰 안전장치 하나로(기획자님 09-29)
   const FENCE = '```';
-  const AD_VERSION = '2.3.5';
+  const AD_VERSION = '2.3.6';
   // v2.3.0 AD 카드 연동(회의 기억) — 기획자님 09-30 확정(dev_notes 2.3.0 절):
   // 회의 응답마다 끝에 <meeting_memo> 한 줄(질문 요지 · 답 요지 · 마지막 말)을 받아 회의 목록 항목에 저장하고,
   // AD 카드의 본 모델 요청 때 모든 카드 · 모든 채팅을 통틀어 최근 N건을 <meeting_notes> 시스템 메시지로 끼운다. 카드 · 채팅에 쓰는 것 0.
@@ -5643,6 +5643,15 @@
         }
         await saveSettings();
         render();
+        return;
+      }
+      // v2.3.6 편집회의 모델 칸 = 변경 즉시 저장 — 고른 모델로 모든 호출(전송 · 다시 시도 · 재시도 · 팝오버 의견 · 인풋 도우미 · 아크 · 큐시트 · 떡밥)이 간다.
+      // 전에는 「전송」을 누를 때만 저장돼서, 칸을 바꾼 뒤 다른 버튼을 누르면 이전 모델로 나갔다(사용자 제보 10-22)
+      if (id === 'ghModelSel') {
+        if (ev.target.value !== state.settings.modelMode) {
+          state.settings.modelMode = ev.target.value;
+          await saveSettings();
+        }
         return;
       }
       if (id === 'ghLoreAlways' && state.loreDraft) {
