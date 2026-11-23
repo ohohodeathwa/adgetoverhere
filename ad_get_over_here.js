@@ -1,7 +1,7 @@
 //@name AD_get_over_here
-//@display-name AD야 잠깐 와봐 v3.0.0
+//@display-name AD야 잠깐 와봐 v3.0.1
 //@api 3.0
-//@version 3.0.0
+//@version 3.0.1
 //@update-url https://raw.githubusercontent.com/ohohodeathwa/adgetoverhere/main/ad_get_over_here.js
 //@link https://github.com/ohohodeathwa/adgetoverhere Documentation
 
@@ -62,6 +62,11 @@
   //   · 「'클릭이나 터치 한 번'으로 전체화면이 닫히기 때문에, 입력하다 삑사리나면 입력내용이 전부 날아가버림. 이걸 막고자 하는거니 새로고침 뒤에도 남아야겠지」)
   //   방마다 1건 { v, items: { 회의 id: 입력하던 글 } } · 회의마다 따로 · 입력 뒤 0.5초에 저장(인풋 도우미와 같은 간격) · 전송하면 그 회의 것을 지움 · 회의를 지우면 같이 지움
   const DRAFT_PREFIX = 'ad_plugin:draft:';
+  // v3.0.1 전체 화면의 그 밖의 글 칸에 입력하던 글(11-24 기획자님 「편집회의 텍스트는 보존되는데, 정작 스토리아크 등 다른 곳의 입력란 보존이 안되는 문제」)
+  //   방마다 1건 { v, at, arc?: { mode, form?, draft?, adapt?, next?: { gap, keep, direct }, pend?: { kind, baseTurn } }, cue?: { seed?, id?, text?, note? }, lore?: { scope, isNew?, sig?, d } }
+  //   입력하던 글이 있을 때만 남김(없으면 키를 지움) · 입력 뒤 0.5초에 저장(편집회의와 같은 간격) · 저장 · 취소 · 삭제로 그 칸이 닫히면 같이 지워짐
+  //   되살리는 때 = 전체 화면을 열 때(스토리 아크 · 큐시트) · 그 뒤 처음 로어북 탭에 들어갈 때(로어북 폼) · 어느 칸까지 남길지와 되살리는 방식은 Claude가 고름
+  const PANELDRAFT_PREFIX = 'ad_plugin:paneldraft:';
   // v3.0.0 10단계 관계 탭(10-26 기획자님 결정 「다중 관계를 탭 메뉴로써 하나 만들자」 · 11-07 결정 #41 ~ #51 · 11-06 결정 #27) — 방마다 1건
   //   { v, people: [{ id, name, goal, own, pick, keys, draft, draftAt, entry }], week: [월 ~ 일 일곱 글] | null, weekAt, pending: { week, drafts: { 사람 id: 글 }, at } | null }
   //   people = 사람 줄(이름 · 목표 관계) · keys = 그 사람을 가리키는 낱말(적은 이름 + 이어진 로어북 항목의 키 전부) · draft = 인물 항목 초안 · entry = [적용]한 인물 항목의 이름(#45의 기억)
@@ -103,6 +108,7 @@
     { pfx: DRAFT_PREFIX, label: '편집회의에 입력하던 글' }, // 11-11 편집회의 입력란 보존(이름표 = Claude 초안)
     { pfx: REL_PREFIX, label: '관계 탭' }, // v3.0.0 10단계 관계 탭(이름표 = Claude 초안)
     { pfx: ARCPAST_PREFIX, label: '지난 스토리 아크' }, // v3.0.0 9단계 연작(이름표 = Claude 초안)
+    { pfx: PANELDRAFT_PREFIX, label: '스토리 아크 · 큐시트 · 로어북에 입력하던 글' }, // v3.0.1 그 밖의 글 칸 보존(이름표 = Claude 초안)
   ];
   // 카드마다 하나씩 두는 저장 키(키 꼬리 = 카드 chaId)와 그 이름표(11-11 · 이름표 = Claude 초안) — 데이터 청소 · 넣어두기 이름표 · 넣어두기 겹침 판별이 이 표를 읽는다.
   //   청소 = 카드 단위 버튼에서만 지움(「이 카드의 기록 삭제」 = 이 카드 것 · 「이 카드만 남기기」 = 다른 카드 것 · 「전체 기록 삭제」 = 전부 · 「이 채팅방만 남기기」는 건드리지 않음
@@ -135,7 +141,7 @@
   const SETTING_ID = 'ad-plugin-setting';
   // v2.2.0 구간별 고정 제한(로어북 60,000자 · 장기기억 20,000자 · 변수 값 4,000자) 폐지 → 토큰 안전장치 하나로(기획자님 09-29)
   const FENCE = '```';
-  const AD_VERSION = '3.0.0';
+  const AD_VERSION = '3.0.1';
   // v2.3.0 AD 카드 연동(회의 기억) — 기획자님 09-30 확정(dev_notes 2.3.0 절):
   // 회의 응답마다 끝에 <meeting_memo> 한 줄(질문 요지 · 답 요지 · 마지막 말)을 받아 회의 목록 항목에 저장하고,
   // AD 카드의 본 모델 요청 때 모든 카드 · 모든 채팅을 통틀어 최근 N건을 <meeting_notes> 시스템 메시지로 끼운다. 카드 · 채팅에 쓰는 것 0.
@@ -652,6 +658,7 @@
     loreSnaps: [],
     loreSnapOpen: false,
     applied: null,      // 11-11 수정 기록(지금 방 · 카드의 것) { room, chaId, roomMap, cardMap } — reloadRoom이 읽고 [적용]이 보탬
+    arcKeepOnce: false, // v3.0.1 전체 화면을 열 때 각색 · 다음 부 화면을 되살렸으면, 스토리 아크 탭에 처음 들어갈 때 한 번 그대로 둠(그 뒤 탭을 나갔다 오면 전처럼 닫힘)
     meetDrafts: null,   // 11-11 편집회의 입력란에 입력하던 글(지금 방의 것) { room, items: { 회의 id: 글 } } — reloadRoom이 읽고 입력할 때마다 고침
     loreFolderClosed: {}, // v2.1.0 접어 둔 폴더 {folderKey: true}
     composing: false,   // 한글 IME 조합 중 — 이때 DOM을 갈아치우면 자모가 흩어진다
@@ -802,6 +809,224 @@
     };
     meetDraftChain = meetDraftChain.then(run, run);
     return meetDraftChain;
+  }
+
+  // ── v3.0.1 전체 화면의 그 밖의 글 칸에 입력하던 글(위 PANELDRAFT_PREFIX 주석) ──
+  //   화면 값(state.arc* · state.cue* · state.lore*)에서 「입력하던 글」만 추려 방마다 한 건으로 남김 · 다시 그릴 때와 글 칸에 입력할 때마다 견줘, 바뀌었으면 0.5초 뒤 저장
+  //   되살림을 마친 방에서만 적음(panelDraftRoom) — 전체 화면을 여는 도중의 빈 화면 값이 남겨 둔 글을 지우지 않게
+  //   탭을 나갔다 올 때 닫히던 화면(각색 · 다음 부 폼 · 로어북 폼)은 전처럼 닫힘 · 전체 화면을 닫았다 열거나 새로고침한 뒤 처음 들어갈 때만 되살림
+  const panelDraftDirty = new Map(); // 방 → 추린 값 | null(지움) · 저장을 기다리는 것
+  let panelDraftTimer = null;
+  let panelDraftChain = Promise.resolve(); // 저장은 차례로
+  let panelDraftRoom = null;  // 되살림을 마친 방(그 방에서만 적음)
+  let panelDraftJson = '';    // 그 방에 마지막으로 적은(읽은) 꼴
+  let panelLoreCarry = null;  // 저장소에서 읽었지만 아직 되살리지 않은 로어북 폼(로어북 탭에 처음 들어갈 때 되살리고 비움) { scope, isNew, sig, d }
+  const PANEL_FORM_TEXT = ['story', 'turns', 'mood', 'ending', 'scenes', 'genre1Other', 'genre2Other'];
+  function arcFormTyped(f) {
+    return !!f && PANEL_FORM_TEXT.some((k) => String(f[k] || '').trim());
+  }
+  // 로어북 항목의 지문(이름 · 키 · 본문 · 항상 활성화) — 순서가 바뀌어도 같은 항목의 폼으로 되살리려고 번호 대신 씀
+  function loreEntrySig(e) {
+    return hashStr([String((e && e.comment) || ''), String((e && e.key) || ''), String((e && e.content) || ''), (e && e.alwaysActive) ? '1' : '0'].join('\u0001'));
+  }
+  function loreDraftRec(scope, isNew, sig, d) {
+    return {
+      scope: scope === 'chat' ? 'chat' : 'card', isNew: !!isNew, sig: String(sig || ''),
+      d: { comment: String((d && d.comment) || ''), key: String((d && d.key) || ''), content: String((d && d.content) || ''), alwaysActive: !!(d && d.alwaysActive) },
+    };
+  }
+  // 지금 화면 값에서 입력하던 글만 추림(없으면 null) — 고른 값(장르 · 진입 방식 · 넘길 복선)은 글이 있을 때 그 글과 함께 남김
+  function panelDraftSnap() {
+    const env = state.env;
+    if (!env) return null;
+    const out = {};
+    const arcNow = String(state.arc || '');
+    const hasArc = !!arcNow.trim();
+    const f = Object.assign(emptyArcForm(), state.arcForm || {});
+    const nx = (state.arcNext && state.arcNext.room === env.room) ? state.arcNext : null;
+    const pend = (state.arcPending && state.arcPending.room === env.room) ? state.arcPending : null;
+    const gap = nx ? String(nx.gap || '') : '';
+    const nextOf = (direct) => ({ gap, keep: Object.assign({}, (nx && nx.keep) || {}), direct: !!direct });
+    if (state.arcMode === 'edit') {
+      const d = String(state.arcDraft || '');
+      // 손대지 않은 사본([편집]이 넣은 지금 스토리 아크 · AD가 띄운 결과 그대로)은 입력하던 글로 세지 않음
+      const typed = !!d.trim() && d !== arcNow && !(pend && !pend.typed && d === pend.text);
+      if (typed) {
+        // [저장]이 가는 길(다음 부를 직접 적던 글 = 앞 부를 옮김 · 챕터로 나눈 결과 = 시작 턴을 다시 잡음)을 글과 함께 남김
+        out.arc = { mode: 'edit', draft: d };
+        if (nx && nx.direct && hasArc) { out.arc.form = f; out.arc.next = nextOf(true); }
+        else if (pend) out.arc.pend = { kind: String(pend.kind || ''), baseTurn: (typeof pend.baseTurn === 'number' ? pend.baseTurn : null) };
+        else if (!hasArc && arcFormTyped(f)) out.arc.form = f;
+      } else if (nx && nx.direct && hasArc && (arcFormTyped(f) || gap.trim())) {
+        out.arc = { mode: 'next', form: f, next: nextOf(false) };
+      } else if (!hasArc && !pend && arcFormTyped(f)) {
+        out.arc = { mode: 'create', form: f };
+      }
+    } else if (state.arcMode === 'adapt') {
+      const note = String(state.arcAdaptNote || '');
+      if (hasArc && note.trim()) out.arc = { mode: 'adapt', adapt: note };
+    } else if (state.arcMode === 'next') {
+      if (nx && hasArc && (arcFormTyped(f) || gap.trim())) out.arc = { mode: 'next', form: f, next: nextOf(false) };
+    } else if (state.arcMode === 'create') {
+      if (!hasArc && arcFormTyped(f)) out.arc = { mode: 'create', form: f };
+    }
+    const cue = {};
+    const seed = String(state.cueSeed || '');
+    if (seed.trim() && !(state.cues && state.cues.length)) cue.seed = seed; // 첫 입력 칸은 큐시트가 비어 있을 때만 보임
+    const open = state.cueOpenId ? (state.cues || []).find((c) => c && c.id === state.cueOpenId) : null;
+    if (open) {
+      const t = String(state.cueDraft != null ? state.cueDraft : (open.text || ''));
+      const n = String(state.cueNote || '');
+      if (t.trim() !== String(open.text || '').trim() || n.trim()) { cue.id = open.id; cue.text = t; cue.note = n; }
+    }
+    if (Object.keys(cue).length) out.cue = cue;
+    if (panelLoreCarry) {
+      out.lore = panelLoreCarry; // 아직 로어북 탭에 들어가지 않음 = 읽어 둔 것을 그대로 이어 남김
+    } else if (state.loreDraft && (state.loreNew || state.loreOpenIdx != null)) {
+      const d = loreDraftRec(state.loreScope, state.loreNew, '', state.loreDraft).d;
+      if (state.loreNew) {
+        if (d.comment.trim() || d.key.trim() || d.content.trim()) out.lore = loreDraftRec(state.loreScope, true, '', d);
+      } else {
+        const e = (state.loreList || [])[state.loreOpenIdx];
+        if (e && (d.comment !== String(e.comment || '') || d.key !== String(e.key || '') || d.content !== String(e.content || '') || d.alwaysActive !== !!e.alwaysActive)) {
+          out.lore = loreDraftRec(state.loreScope, false, loreEntrySig(e), d);
+        }
+      }
+    }
+    return Object.keys(out).length ? out : null;
+  }
+  // 지금 화면 값을 견줘, 남길 것이 바뀌었으면 0.5초 뒤 저장(다시 그린 뒤 · 글 칸에 입력한 뒤에 부름)
+  function syncPanelDraft() {
+    const env = state.env;
+    if (state.surface !== 'panel' || !env || !env.room || panelDraftRoom !== env.room) return;
+    const snap = panelDraftSnap();
+    const json = snap ? JSON.stringify(snap) : '';
+    if (json === panelDraftJson) return;
+    panelDraftJson = json;
+    panelDraftDirty.set(env.room, snap);
+    clearTimeout(panelDraftTimer);
+    panelDraftTimer = setTimeout(() => { flushPanelDraft().catch(() => {}); }, 500);
+  }
+  // 기다리던 것을 지금 저장(타이머 · 플러그인을 내릴 때) — 남길 글이 없으면 그 방의 키를 지움
+  function flushPanelDraft() {
+    clearTimeout(panelDraftTimer);
+    panelDraftTimer = null;
+    const run = async () => {
+      const jobs = Array.from(panelDraftDirty.entries());
+      panelDraftDirty.clear();
+      for (const [room, snap] of jobs) {
+        if (snap) await state.storage.setItem(PANELDRAFT_PREFIX + room, Object.assign({ v: 1, at: Date.now() }, snap));
+        else await state.storage.removeItem(PANELDRAFT_PREFIX + room);
+      }
+    };
+    panelDraftChain = panelDraftChain.then(run, run);
+    return panelDraftChain;
+  }
+  async function loadPanelDraft(room) {
+    if (!room) return null;
+    if (panelDraftDirty.has(room)) return panelDraftDirty.get(room); // 저장을 기다리는 값이 더 새 값(입력한 지 0.5초 안에 닫았다 다시 연 경우)
+    try { await panelDraftChain; } catch (e) { /* 앞 저장이 실패했어도 저장소의 값을 읽음 */ }
+    const rec = await state.storage.getItem(PANELDRAFT_PREFIX + room);
+    return (rec && typeof rec === 'object') ? rec : null;
+  }
+  // AD 호출이 그 글 칸의 글을 쓰고 끝났을 때 부름(runArcLLM · runCueLLM): 그 방의 기록에서 그 부분(arc · cue)을 걷음
+  //   전체 화면을 닫은 사이에 끝난 호출은 다시 그리기의 견주기를 거치지 않아, 이미 쓰인 글(다음 부 폼 · 각색 방향 · 큐 각색 방향)이 저장소에 남았다가
+  //   다시 열 때 되살아남(11-24 검토에서 나온 흠 · 시험으로 재현) → 저장소의 기록을 여기서 직접 고침 · 실패한 호출에서는 부르지 않음(적던 글은 남김)
+  async function dropPanelDraftPart(room, part) {
+    if (!room) return;
+    try {
+      const rec = await loadPanelDraft(room);
+      if (!rec || typeof rec !== 'object' || !rec[part]) return;
+      const rest = Object.assign({}, rec);
+      delete rest.v; delete rest.at; delete rest[part];
+      const snap = Object.keys(rest).length ? rest : null;
+      panelDraftDirty.set(room, snap);
+      if (panelDraftRoom === room) panelDraftJson = snap ? JSON.stringify(snap) : '';
+      clearTimeout(panelDraftTimer);
+      panelDraftTimer = setTimeout(() => { flushPanelDraft().catch(() => {}); }, 500);
+    } catch (e) { console.warn('[AD] 입력하던 글의 기록을 걷지 못함', e); }
+  }
+  // 전체 화면을 열 때: 읽어 둔 기록을 화면 값으로 되살림(openPanel이 화면 값을 비운 뒤에 부름) · 이 방에서 적기 시작함
+  //   스토리 아크 = 폼 값 · 편집 칸(저장이 가는 길과 함께) · 각색 방향 · 다음 부 폼 / 큐시트 = 첫 입력 칸 · 펼쳐 둔 큐의 편집 칸과 각색 방향(그 큐가 남아 있을 때)
+  //   그 사이 스토리 아크나 큐가 바뀌었어도 적던 글은 그대로 되살림(저장할지는 화면에서 보고 정함 · Claude가 고름)
+  function applyPanelDraft(rec) {
+    const env = state.env;
+    panelDraftRoom = env ? env.room : null;
+    panelDraftJson = '';
+    panelLoreCarry = null;
+    state.arcKeepOnce = false;
+    if (!env) return;
+    const s = (v) => (typeof v === 'string' ? v : '');
+    const hasArc = !!(state.arc && state.arc.trim());
+    const a = (rec && rec.arc && typeof rec.arc === 'object') ? rec.arc : null;
+    if (a) {
+      if (a.form && typeof a.form === 'object') {
+        const f = emptyArcForm();
+        for (const k of Object.keys(f)) f[k] = s(a.form[k]);
+        state.arcForm = f;
+      }
+      const nxOf = (direct) => {
+        const old = (a.next && a.next.keep && typeof a.next.keep === 'object') ? a.next.keep : {};
+        const keep = {};
+        for (const it of arcNextItems(parseArcCells(state.arc), arcStateFor(state.arcState, state.arcPlan))) keep[it.id] = (typeof old[it.id] === 'boolean') ? old[it.id] : it.on;
+        return { room: env.room, gap: s(a.next && a.next.gap), keep, direct: !!direct };
+      };
+      if (a.mode === 'edit' && s(a.draft).trim()) {
+        state.arcMode = 'edit';
+        state.arcDraft = a.draft;
+        if (a.next && a.next.direct && hasArc) state.arcNext = nxOf(true);
+        else if (a.pend && typeof a.pend === 'object' && hasArc && !(state.arcPending && state.arcPending.room === env.room)) {
+          state.arcPending = { room: env.room, text: a.draft, kind: s(a.pend.kind), baseTurn: (typeof a.pend.baseTurn === 'number' ? a.pend.baseTurn : null), typed: true };
+        }
+      } else if (a.mode === 'adapt' && hasArc && s(a.adapt).trim()) {
+        state.arcMode = 'adapt';
+        state.arcAdaptNote = a.adapt;
+        state.arcKeepOnce = true;
+      } else if (a.mode === 'next' && hasArc && a.next && typeof a.next === 'object') {
+        state.arcNext = nxOf(false);
+        state.arcMode = 'next';
+        state.arcKeepOnce = true;
+      }
+    }
+    const c = (rec && rec.cue && typeof rec.cue === 'object') ? rec.cue : null;
+    if (c) {
+      if (s(c.seed).trim()) state.cueSeed = c.seed;
+      const item = c.id ? (state.cues || []).find((x) => x && x.id === c.id) : null;
+      if (item) {
+        state.cueOpenId = item.id;
+        state.cueDraft = (typeof c.text === 'string') ? c.text : (item.text || '');
+        state.cueNote = s(c.note);
+      }
+    }
+    const l = (rec && rec.lore && typeof rec.lore === 'object' && rec.lore.d && typeof rec.lore.d === 'object') ? rec.lore : null;
+    if (l) panelLoreCarry = loreDraftRec(l.scope, l.isNew, l.sig, l.d);
+    // 견줄 기준 = 저장소에 있는 꼴 → 되살리지 않은 것(없어진 큐의 글 · 큐가 생긴 뒤의 첫 입력 칸 글)이 있으면 다음에 견줄 때 저장소에서도 걷힘
+    if (rec && typeof rec === 'object') {
+      const rest = Object.assign({}, rec);
+      delete rest.v; delete rest.at;
+      panelDraftJson = Object.keys(rest).length ? JSON.stringify(rest) : '';
+    }
+  }
+  // 데이터 청소가 지금 방의 기록을 지웠을 때: 화면에 남은 입력하던 글도 비우고, 그 방의 키를 다시 쓰지 않게 지움을 걸어 둠
+  function dropPanelDraftState(room) {
+    state.arcDraft = '';
+    state.arcForm = emptyArcForm();
+    state.arcAdaptNote = '';
+    state.arcKeepOnce = false;
+    state.cueSeed = '';
+    state.cueDraft = '';
+    state.cueNote = '';
+    state.loreOpenIdx = null;
+    state.loreDraft = null;
+    state.loreNew = false;
+    state.loreDeleteAsk = null;
+    panelLoreCarry = null;
+    panelDraftJson = '';
+    if (room) {
+      panelDraftDirty.set(room, null);
+      clearTimeout(panelDraftTimer);
+      panelDraftTimer = setTimeout(() => { flushPanelDraft().catch(() => {}); }, 500);
+    }
   }
 
   // v2.3.0 회의 메모 = 회의 목록 항목에 회의마다 최신 1줄(응답마다 새로 씀). 끼울 때 회의 본문을 열지 않아도 되게 목록에 둔다.
@@ -2256,7 +2481,12 @@
   }
 
   async function openLoreScreen(scope) {
+    // v3.0.1 전체 화면을 연 뒤 다른 화면에서 로어북 탭으로 처음 들어올 때: 남겨 둔 로어북 폼의 글이 있으면 그 폼으로 되살림(그 범위의 목록으로 엶)
+    //   로어북 화면 안에서 다시 읽는 길(저장 뒤 · 범위 바꾸기 · 되돌리기)에서는 되살리지 않음
+    const loreCarry = (state.screen !== 'lore') ? panelLoreCarry : null;
+    if (state.screen !== 'lore') panelLoreCarry = null;
     state.loreScope = (scope === 'chat') ? 'chat' : 'card';
+    if (loreCarry) state.loreScope = loreCarry.scope;
     state.loreErr = '';
     state.loreOpenIdx = null;
     state.loreDraft = null;
@@ -2269,6 +2499,16 @@
     const m = other ? other.list.length : 0;
     state.loreCounts = state.loreScope === 'card' ? { card: n, chat: m } : { card: m, chat: n };
     state.loreSnaps = await loadLoreSnapshotsFor(state.env);
+    if (loreCarry) {
+      // 새 항목 폼 = 그대로 엶 · 있던 항목의 폼 = 지문이 같은 항목이 꼭 하나일 때만 그 항목으로 엶(그 사이 항목이 바뀌었거나 없어졌으면 되살리지 않음)
+      const d = { comment: loreCarry.d.comment, key: loreCarry.d.key, content: loreCarry.d.content, alwaysActive: loreCarry.d.alwaysActive };
+      if (loreCarry.isNew) { state.loreNew = true; state.loreDraft = d; }
+      else {
+        const hits = [];
+        state.loreList.forEach((e, i) => { if (loreEntrySig(e) === loreCarry.sig) hits.push(i); });
+        if (hits.length === 1) { state.loreOpenIdx = hits[0]; state.loreDraft = d; }
+      }
+    }
     state.screen = 'lore';
     render();
   }
@@ -5739,6 +5979,7 @@
       failKeep('cue', room, note); // 11-15 남는 실패 줄(1라운드 발견 ①: 오래 기다린 뒤 빈 답으로 끝나도 큐시트 탭에 글이 남게)
     }
     callEnd('cue', tok);
+    if (ok && kind !== 'more') await dropPanelDraftPart(room, 'cue'); // v3.0.1 이 호출이 쓴 첫 입력 칸 글 · 큐 각색 방향은 남겨 둔 기록에서도 걷음(「이어서 생성하기」는 글 칸을 쓰지 않으므로 그대로)
     if (state.cueBusyTok === tok) { state.cueBusy = false; state.cueBusyKind = ''; }
     render();
     // 검토 반영: 기다리는 사이 다른 채팅으로 옮겼으면 그 채팅에 저장된 것처럼 읽히지 않게
@@ -7596,6 +7837,7 @@
       failed = true;
     }
     callEnd('arc', atok);
+    if (!failed) await dropPanelDraftPart(room, 'arc'); // v3.0.1 이 호출이 쓴 폼 · 각색 방향은 남겨 둔 기록에서도 걷음(전체 화면을 닫은 사이에 끝나도)
     if (state.arcBusyTok === atok) { state.arcBusy = false; state.arcBusyKind = ''; }
     if (failed) failKeep('arc', room, note);
     render();
@@ -11470,6 +11712,7 @@
         try { again.focus({ preventScroll: true }); if (typing.s != null) again.setSelectionRange(typing.s, typing.e); } catch (e) { /* 숫자 칸은 커서 자리를 받지 않는다 */ }
       }
     }
+    syncPanelDraft(); // v3.0.1 전체 화면을 다시 그릴 때마다 입력하던 글을 견줘 남김(저장 · 취소로 칸이 닫혔으면 지워짐)
   }
 
   function toast(msg) {
@@ -11516,10 +11759,14 @@
   async function openPanel(screen, opts) {
     const env = await resolveEnv();
     if (!env && screen !== 'settings') return;
+    panelDraftRoom = null; // v3.0.1 아래에서 되살림을 마칠 때까지는 입력하던 글을 적지 않음(여는 도중의 빈 화면 값이 남겨 둔 글을 지우지 않게)
     state.surface = 'panel';
     state.miniBig = false;
     state.env = env;
     await reloadRoom(env); // v3.0.0 방 다시 읽기(아크 · 큐 · 큐 옵션 · 토큰 · 떡밥 · 아크 점검)
+    // v3.0.1 이 방의 글 칸에 입력하던 글(스토리 아크 · 큐시트 · 로어북)을 읽어 둠 → 아래에서 화면 값을 비운 뒤 되살림 · 읽지 못해도 전체 화면은 그대로 엶
+    let panelRec = null;
+    try { panelRec = env ? await loadPanelDraft(env.room) : null; } catch (e) { console.warn('[AD] 입력하던 글을 읽지 못함', e); }
     state.hookBusy = false;
     state.relBusy = false; // 11-12 검토 반영: 「스케줄 만들기」의 바쁨 표시도 패널을 열 때 풂(멈춘 호출이 관계 탭을 계속 잠그지 않게 · 늦게 온 답은 방마다의 호출 번호가 거름)
     state.relBusyRoom = null;
@@ -11562,6 +11809,12 @@
       state.arcMode = 'edit';
       state.arcDraft = state.arcPending.text;
     }
+    // v3.0.1 로어북 폼의 화면 값도 여기서 비움(다른 방에서 열어 둔 폼이 이 방의 기록으로 남지 않게 · 로어북 탭에 들어갈 때 어차피 비우던 값) → 읽어 둔 입력하던 글을 되살림
+    state.loreOpenIdx = null;
+    state.loreDraft = null;
+    state.loreNew = false;
+    state.loreDeleteAsk = null;
+    applyPanelDraft(panelRec);
 
     state.bundleAsk = null;
     if (screen === 'settings') {
@@ -11983,6 +12236,9 @@
     try { state.meetDrafts = state.env ? await loadMeetDrafts(state.env.room) : null; } catch (e) { state.meetDrafts = null; }
     // v3.0.0 10단계: 지운 방의 관계 탭은 저장을 기다리던 값도 버림(지운 뒤에 다시 써 넣지 않게) · 화면 값은 저장소에서 다시 읽음
     for (const r of Array.from(relDirty.keys())) if (cleanupRoomMatch(scope, r)) relDirty.delete(r);
+    // v3.0.1 지운 방의 글 칸에 입력하던 글은 저장을 기다리던 것도 버림(지운 뒤에 다시 써 넣지 않게) · 지금 방이 지워졌으면 화면에 남은 입력하던 글도 비움
+    for (const r of Array.from(panelDraftDirty.keys())) if (cleanupRoomMatch(scope, r)) panelDraftDirty.delete(r);
+    if (state.env && cleanupRoomMatch(scope, state.env.room)) dropPanelDraftState(state.env.room);
     try { state.rel = state.env ? await loadRel(state.env.room) : null; } catch (e) { state.rel = null; }
     if (state.env && cleanupRoomMatch(scope, state.env.room)) { state.relOpenId = null; state.relStale = null; state.relWeekAsk = false; }
     // 현재 방의 데이터가 지워진 스코프면 화면 상태도 초기화
@@ -12303,7 +12559,23 @@
     if (state.eventsBound) return;
     state.eventsBound = true;
 
+    // v3.0.1 바깥 누름 닫기는 누름이 바깥에서 시작했을 때만(11-24 제보 「창 안에서 시작한 드래그는 바깥 클릭으로 인식하지 않도록. (마우스를 누른 위치가 창 밖일 때만 닫히게)」)
+    //   글 칸 안에서 눌러 끌다가 패널 밖에서 떼면 브라우저가 click을 두 자리의 공통 조상(패널 뿌리 = 바깥 누름 자리)에 냄 → 누르기 시작한 자리를 적어 두고, 패널 안에서 시작한 누름이면 닫지 않음
+    //   적어 둔 누름이 없으면(누름 없이 온 click) 전처럼 닫음 · 적은 것은 바로 다음 click 한 번에만 씀(묵은 표식이 다음 누름을 대신 먹지 않게 · 08-26 끌기 표식과 같은 까닭)
+    //   11-24 기획자님 「반대 방향도 넣어 줘」(바깥에서 눌러 패널 안에서 뗀 누름도 닫지 않음): 놓은 자리도 적음 → 닫는 것은 바깥에서 누르고 바깥에서 뗀 누름
+    let pressInPanel = false, liftInPanel = false;
+    const inPanelEv = (ev) => { const t = ev.target; return !!(t && t.closest && t.closest('.ghPanel')); };
+    const notePress = (ev) => { pressInPanel = inPanelEv(ev); liftInPanel = false; };
+    const noteLift = (ev) => { liftInPanel = inPanelEv(ev); };
+    document.addEventListener('pointerdown', notePress, true);
+    document.addEventListener('mousedown', notePress, true);
+    document.addEventListener('pointerup', noteLift, true);
+    document.addEventListener('mouseup', noteLift, true);
+
     document.addEventListener('click', async (ev) => {
+      const pressedInPanel = pressInPanel, liftedInPanel = liftInPanel; // v3.0.1 누르기 시작한 자리 · 놓은 자리(이 click 한 번에만 씀)
+      pressInPanel = false;
+      liftInPanel = false;
       // 드래그로 끝난 포인터가 뒤이어 click을 한 번 발생시킨다 — 알약이 열리지 않게 삼킨다.
       // ★단 표식에 시한을 둔다: 드래그가 iframe 밖(루트 문서)에서 끝나면 눌린 곳과 놓은 곳이
       // 다른 문서라 이 문서에는 click이 아예 오지 않는다. 시한이 없으면 그 표식이 그대로 살아남아
@@ -12316,6 +12588,9 @@
       const el = ev.target.closest('[data-action]');
       if (!el) return;
       const action = el.dataset.action;
+      // v3.0.1 패널 안에서 누르기 시작해 바깥에서 뗀 click = 바깥 누름으로 세지 않음(닫지 않고, 설정 화면의 빠져나갈 때 저장 · 치던 글 걷기도 돌지 않음)
+      //   누른 자리나 놓은 자리 가운데 어느 쪽이든 패널 안이면 = 끌다가 걸친 누름(어느 방향이든)
+      if (action === 'backdrop' && ev.target === el && (pressedInPanel || liftedInPanel)) return;
 
       // 11-11 검토 반영: 팝오버의 줄 닫기(✕) 직후 잠깐은 모델 호출 · 전송 버튼의 누름을 받지 않음(MINI_TAP_GUARDED · 같은 자리의 둘째 누름이 내려온 버튼에 닿는 경우)
       if (MINI_TAP_GUARDED.indexOf(action) >= 0 && Date.now() < (state.miniTapGuardUntil || 0)) return;
@@ -12954,6 +13229,14 @@
         case 'tab-arc':
           if (!state.env) break;
           if (state.screen === 'arc') break;
+          if (state.arcKeepOnce) {
+            // v3.0.1 전체 화면을 열 때 되살린 각색 · 다음 부 화면은 처음 한 번 그대로 엶(아래의 「기본 모드로」를 건너뜀 · 그 뒤 탭을 나갔다 오면 전처럼 닫힘)
+            state.arcKeepOnce = false;
+            state.screen = 'arc';
+            state.arcScrollNow = true;
+            render();
+            break;
+          }
           if (!(state.arcMode === 'edit' && state.arcDraft)) {
             // 편집 중 초안(생성/각색 결과 포함)이 있으면 보존, 그 외엔 기본 모드로
             state.arcMode = (state.arc && state.arc.trim()) ? 'view' : 'create';
@@ -13365,6 +13648,7 @@
       else if (id === 'ghArcFGenre1Other') state.arcForm.genre1Other = ev.target.value; // v3.0.0 아크 틀 「기타」 직접 입력
       else if (id === 'ghArcFGenre2Other') state.arcForm.genre2Other = ev.target.value;
       else if (id === 'ghArcAdaptInput') state.arcAdaptNote = ev.target.value;
+      else if (id === 'ghArcNGap') { if (state.arcNext) state.arcNext.gap = ev.target.value; } // v3.0.1 다음 부 폼의 「얼마 뒤」 칸도 입력할 때마다 화면 값에(전에는 버튼을 누를 때만 읽음)
       // 11-10 설정 즉시 저장: 추가 요청사항 · 숫자 칸 셋 = 치던 글을 담아 두고 입력 1초 뒤 저장(화살표로 숫자를 올리고 내려도 이 길)
       else if (id === 'ghSetPersona') { state.personaDraft = ev.target.value; scheduleSetSave(id); }
       else if (id && SET_NUMS[id]) { state.setDraft[id] = ev.target.value; scheduleSetSave(id); }
@@ -13383,6 +13667,8 @@
         if (state.composing || ev.isComposing) return;
         scheduleLoreFilter();
       }
+      // v3.0.1 스토리 아크 · 큐시트 · 로어북 폼의 글 칸에 입력했으면 입력하던 글을 견줘 남김(0.5초 뒤 저장)
+      if (id && /^gh(Arc|Cue|LoreName$|LoreKey$|LoreContent$)/.test(id)) syncPanelDraft();
     });
 
     // ---- 미니 팝오버 · 알약 드래그 ----
@@ -14484,6 +14770,7 @@
     // 11-11 편집회의 입력란: 저장을 기다리던 글이 있으면 저장
     try { await flushMeetDrafts(); } catch (e) { /* 종료 중 무시 */ }
     try { await flushRel(); } catch (e) { /* 종료 중 무시 · v3.0.0 10단계 관계 탭에 입력하던 값 */ }
+    try { await flushPanelDraft(); } catch (e) { /* 종료 중 무시 · v3.0.1 스토리 아크 · 큐시트 · 로어북 글 칸에 입력하던 글 */ }
     try { await api.removeRisuChatListener('output', onOutput); } catch (e) { /* 종료 중 무시 */ }
     try { await api.removeRisuReplacer('beforeRequest', onBeforeRequest); } catch (e) { /* 종료 중 무시 */ }
     try {
